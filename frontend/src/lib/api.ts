@@ -1,4 +1,13 @@
-export type RunStatus = "running" | "succeeded" | "failed" | "canceled" | "interrupted" | "queued";
+export type RunStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled"
+  | "interrupted"
+  | "queued"
+  /** History entries a Schedule leaves instead of a Run; the reason is in failure_reason. */
+  | "skipped"
+  | "missed";
 
 export interface Run {
   id: number;
@@ -28,6 +37,8 @@ export interface Run {
   stop_requested: boolean;
   /** While queued: the Run it waits for (holding, or queued ahead for, one of its hosts). */
   waiting_for: { id: number; playbook: string } | null;
+  /** The Schedule that fired this Run (or left this skipped/missed entry). */
+  schedule: { id: number | null; name: string } | null;
   /** Working Copy Runs only (null for clean Runs). */
   dirty: boolean | null;
   untracked: string[] | null;
@@ -171,12 +182,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await resp.json();
       if (typeof body.detail === "string") detail = body.detail;
+      else if (Array.isArray(body.detail))
+        detail = body.detail.map((e: { loc?: unknown[]; msg?: string }) => `${(e.loc ?? []).slice(1).join(".")}: ${e.msg}`).join("; ");
     } catch {
       /* not JSON */
     }
     throw new ApiError(detail);
   }
+  if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
+}
+
+export interface ScheduleSettings {
+  name: string;
+  playbook: string;
+  branch: string | null;
+  limit: string | null;
+  tags: string[];
+  check: boolean;
+  diff: boolean;
+  verbosity: number;
+  extra_vars: Record<string, unknown>;
+  cron: string;
+  enabled: boolean;
+  notify_on_changes: boolean;
+}
+
+export interface Schedule extends ScheduleSettings {
+  id: number;
+  last_fired_at: string;
+  next_fire_at: string | null;
+  created_at: string;
+  last_run: { id: number; status: RunStatus } | null;
+}
+
+export interface SchedulerStatus {
+  paused: boolean;
+  time_zone: string;
+  last_tick_at: string | null;
+  ping_configured: boolean;
+  last_ping_at: string | null;
+  last_ping_error: string | null;
 }
 
 export const api = {
@@ -203,6 +249,15 @@ export const api = {
   killRun: (id: number) => request<Run>(`/api/runs/${id}/kill`, { method: "POST" }),
   runAgain: (id: number) => request<Run>(`/api/runs/${id}/again`, { method: "POST" }),
   logStreamUrl: (id: number) => `/api/runs/${id}/log/stream`,
+  schedules: () => request<SchedulerStatus & { schedules: Schedule[] }>("/api/schedules"),
+  createSchedule: (settings: ScheduleSettings) =>
+    request<Schedule>("/api/schedules", { method: "POST", body: JSON.stringify(settings) }),
+  updateSchedule: (id: number, fields: Partial<ScheduleSettings>) =>
+    request<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: JSON.stringify(fields) }),
+  deleteSchedule: (id: number) => request<void>(`/api/schedules/${id}`, { method: "DELETE" }),
+  scheduler: () => request<SchedulerStatus>("/api/scheduler"),
+  setPaused: (paused: boolean) =>
+    request<SchedulerStatus>("/api/scheduler", { method: "PUT", body: JSON.stringify({ paused }) }),
 };
 
 export const isFinished = (run: Run) => !["running", "queued"].includes(run.status);

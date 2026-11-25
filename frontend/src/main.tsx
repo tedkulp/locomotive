@@ -6,6 +6,7 @@ import { Layout } from "@/components/Layout";
 import { HistoryPage } from "@/pages/History";
 import { LaunchPage } from "@/pages/Launch";
 import { PlaceholderPage } from "@/pages/Placeholder";
+import { SchedulesPage } from "@/pages/Schedules";
 import { CurrentRunPage, RunPage } from "@/pages/RunPage";
 import "./index.css";
 
@@ -17,7 +18,7 @@ const router = createBrowserRouter([
       { path: "/runs/current", element: <CurrentRunPage /> },
       { path: "/runs/:id", element: <RunPage /> },
       { path: "/history", element: <HistoryPage /> },
-      { path: "/schedules", element: <PlaceholderPage title="Schedules" /> },
+      { path: "/schedules", element: <SchedulesPage /> },
       { path: "/status", element: <PlaceholderPage title="Status" /> },
     ],
   },

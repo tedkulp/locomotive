@@ -435,3 +435,20 @@ def test_a_schedule_whose_playbook_became_hidden_fails_its_firing_without_runnin
     assert entry["status"] == "failed"
     assert entry["failure_reason"] == "Playbook docker.yml is hidden on this Controller"
     assert stubs.calls("ansible-runner") == []
+
+
+def test_scheduled_runs_are_clean_even_when_a_dirty_working_copy_is_configured(
+    sched_app, clock, remote, stubs, working_copy
+):
+    working_copy.write({"playbooks/servers.yml": "- hosts: servers\n  tasks: [{debug: {msg: wip}}]\n"})
+    clock.set(local(2026, 11, 25, 2, 59))
+    app = sched_app(working_copy_path=working_copy.path)
+    create(app)
+    clock.set(local(2026, 11, 25, 3, 0))
+    tick(app, clock)
+
+    [entry] = entries(app)
+    run = wait_for_run(app, entry["id"])
+    assert (run["checkout"], run["sha"], run["dirty"]) == ("clean", remote.sha("main"), None)
+    [runner] = stubs.calls("ansible-runner")
+    assert str(working_copy.path) not in runner["cwd"]

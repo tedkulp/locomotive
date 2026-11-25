@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue).
+Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping).
 
 ## Layout
 
@@ -55,6 +55,19 @@ clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty
 ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
 clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
 `LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
+
+Schedules (`/api/schedules`, the Schedules page): saved Run settings (Playbook, limit, tags, check/diff,
+verbosity, extra vars, branch; empty branch = the default branch) with a five-field cron expression read in
+`LOCOMOTIVE_TIME_ZONE` (unset: `TZ`, then `/etc/localtime`, then UTC). The scheduler loop (every
+`LOCOMOTIVE_SCHEDULER_INTERVAL_SECONDS`, default 30) looks at cron firings after each Schedule's
+`last_fired_at`; each firing gives one Run with source `schedule`, labelled with its Schedule, always a
+clean export (never the Working Copy). If that Schedule's previous Run is still queued or running, the firing
+leaves a `skipped` history entry with the reason instead. Firings missed while locomotive was down collapse
+into one Run if the newest is at most 1h old, otherwise one `missed` entry is recorded (no Run). DST: a
+skipped wall-clock time doesn't fire; a repeated one fires once (its first occurrence). Disabling a
+Schedule or pausing all of them (`PUT /api/scheduler {"paused": true}`, shown as a banner) drops firings
+with no record; re-enabling or resuming doesn't catch up. The loop also sends the Scheduler Ping (GET
+`LOCOMOTIVE_HEALTHCHECKS_URL`) every 5 minutes, retrying a failed one on the next tick.
 
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names

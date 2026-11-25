@@ -32,5 +32,7 @@ export const statusTone = (status: string) =>
       interrupted: "zinc",
       running: "sky",
       queued: "violet",
+      skipped: "amber",
+      missed: "red",
     }) as const
   )[status] ?? "zinc";

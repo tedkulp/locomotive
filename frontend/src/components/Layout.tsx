@@ -1,6 +1,7 @@
 import { History, Play, Radio, Settings, TrainFront, CalendarClock } from "lucide-react";
 import { NavLink, Outlet } from "react-router";
 
+import { PauseBanner } from "@/components/PauseBanner";
 import { RecentRuns } from "@/components/RecentRuns";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +40,7 @@ export function Layout() {
         </nav>
       </aside>
       <main className="flex-1 min-w-0 overflow-auto">
+        <PauseBanner />
         <Outlet />
       </main>
       <RecentRuns />

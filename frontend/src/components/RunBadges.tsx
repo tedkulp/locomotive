@@ -1,3 +1,5 @@
+import { CalendarClock } from "lucide-react";
+
 import { Badge } from "@/components/ui/badge";
 import type { Run } from "@/lib/api";
 import { shortSha, statusTone } from "@/lib/format";
@@ -12,7 +14,17 @@ export function ModeBadge({ run }: { run: Run }) {
 
 export function SourceBadge({ run }: { run: Run }) {
   const tone = run.source === "schedule" ? "violet" : run.source.startsWith("mcp") ? "sky" : "zinc";
-  return <Badge tone={tone}>{run.source}</Badge>;
+  return (
+    <Badge tone={tone} title={run.schedule ? `Schedule: ${run.schedule.name}` : undefined}>
+      {run.schedule ? (
+        <>
+          <CalendarClock className="size-3" /> {run.schedule.name}
+        </>
+      ) : (
+        run.source
+      )}
+    </Badge>
+  );
 }
 
 export function CheckoutBadge({ run }: { run: Run }) {
