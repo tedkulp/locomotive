@@ -9,6 +9,12 @@ export interface Run {
   branch: string;
   sha: string | null;
   check: boolean;
+  diff: boolean;
+  verbosity: number;
+  limit: string | null;
+  hosts: string[] | null;
+  tags: string[];
+  extra_vars: Record<string, unknown>;
   requirements_hash: string | null;
   ansible_core_version: string | null;
   rc: number | null;
@@ -66,6 +72,50 @@ export interface PlaybookList {
   playbooks: { name: string; path: string }[];
 }
 
+export interface LaunchOptions {
+  playbook: string;
+  limit: string | null;
+  tags: string[];
+  check: boolean;
+  diff: boolean;
+  verbosity: number;
+  extra_vars: Record<string, unknown>;
+}
+
+export interface PreviewTask {
+  name: string;
+  role: string | null;
+  action: string | null;
+  tags: string[];
+  selected: boolean;
+  include: {
+    kind: "include_tasks" | "include_role" | null;
+    target: string | null;
+    expandable: boolean;
+    reason: string | null;
+    task_count: number | null;
+    tasks: PreviewTask[] | null;
+  } | null;
+}
+
+export interface Preview {
+  branch: string;
+  sha: string;
+  command: string;
+  hosts: {
+    hosts: string[];
+    all_hosts: string[];
+    unmatched: string[];
+    plays: { name: string; pattern: string; hosts: string[]; all_hosts: string[] }[];
+  };
+  tasks: {
+    label: string;
+    plays: { name: string; pattern: string; tags: string[]; tasks: PreviewTask[] }[];
+  };
+  tags: string[];
+  inventory: { groups: { name: string; children: string[]; hosts: string[] }[] };
+}
+
 export interface LogLine {
   seq: number;
   text: string;
@@ -98,8 +148,12 @@ export const api = {
     request<PlaybookList>(`/api/playbooks${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`),
   runs: (limit = 50) => request<{ runs: Run[] }>(`/api/runs?limit=${limit}`).then((r) => r.runs),
   run: (id: number) => request<Run>(`/api/runs/${id}`),
-  startRun: (playbook: string) =>
-    request<Run>("/api/runs", { method: "POST", body: JSON.stringify({ playbook }) }),
+  startRun: (options: LaunchOptions) =>
+    request<Run>("/api/runs", { method: "POST", body: JSON.stringify(options) }),
+  preview: (
+    options: LaunchOptions & { expand_includes: boolean; sha?: string },
+    signal?: AbortSignal,
+  ) => request<Preview>("/api/preview", { method: "POST", body: JSON.stringify(options), signal }),
   grid: (id: number) => request<Grid>(`/api/runs/${id}/grid`),
   stopRun: (id: number) => request<Run>(`/api/runs/${id}/stop`, { method: "POST" }),
   killRun: (id: number) => request<Run>(`/api/runs/${id}/kill`, { method: "POST" }),

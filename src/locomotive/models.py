@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import JSON, Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -21,6 +22,12 @@ class Run(Base):
     branch: Mapped[str] = mapped_column(String(255))
     sha: Mapped[str | None] = mapped_column(String(64))
     check: Mapped[bool] = mapped_column(Boolean)
+    diff: Mapped[bool] = mapped_column(Boolean, default=False)
+    verbosity: Mapped[int] = mapped_column(Integer, default=0)
+    limit: Mapped[str | None] = mapped_column(Text)  # as requested; None = every host the Playbook targets
+    hosts: Mapped[list[str] | None] = mapped_column(JSON)  # the resolved host set (exact host preview)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    extra_vars: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     requirements_hash: Mapped[str | None] = mapped_column(String(64))
     ansible_core_version: Mapped[str | None] = mapped_column(String(64))
     rc: Mapped[int | None] = mapped_column(Integer)

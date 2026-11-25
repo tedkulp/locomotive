@@ -64,6 +64,13 @@ class Checkout:
             raise UnknownBranch(f"branch {branch!r} does not exist on the remote")
         return out.strip()
 
+    async def has_commit(self, sha: str) -> bool:
+        """Whether the mirror already has commit ``sha`` (no fetch)."""
+        if not re.fullmatch(r"[0-9a-f]{40}", sha) or not (self._mirror / "HEAD").exists():
+            return False
+        out = await self._git("cat-file", "-e", f"{sha}^{{commit}}", what="Look up commit", allow_fail=True)
+        return out is not None
+
     async def list_playbooks(self, branch: str) -> PlaybookList:
         sha = await self.fetch(branch)
         out = await self._git("ls-tree", "--name-only", f"{sha}:playbooks", what="List Playbooks", allow_fail=True)

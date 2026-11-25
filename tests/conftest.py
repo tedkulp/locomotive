@@ -426,3 +426,23 @@ def sse_events(lines):
                 ident = value
             elif field == "data":
                 data.append(value)
+
+
+def preview_for(hosts: list[str], unmatched: list[str] | None = None) -> dict:
+    """What the preview helper reports for a limit: one play hitting ``hosts``."""
+    return {
+        "ok": True,
+        "plays": [{
+            "name": "Servers",
+            "pattern": "servers",
+            "hosts": hosts,
+            "all_hosts": ["alpha", "beta"],
+            "tags": [],
+            "tasks": [],
+        }],
+        "hosts": hosts,
+        "all_hosts": ["alpha", "beta"],
+        "unmatched": unmatched or [],
+        "tags": [],
+        "groups": [{"name": "servers", "children": [], "hosts": ["alpha", "beta"]}],
+    }

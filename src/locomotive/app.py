@@ -13,6 +13,8 @@ from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
 from locomotive.guard import AccessGuard, parse_networks
 from locomotive.settings import Settings
+from locomotive.preview import Previewer
+from locomotive.runtime import Toolchain
 from locomotive.supervisor import Supervisor
 
 
@@ -26,17 +28,23 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         migrate(engine)
         sessions = make_sessionmaker(engine)
         checkout = Checkout(settings)
-        supervisor = Supervisor(settings, clock, sessions, checkout)
+        toolchain = Toolchain(settings)
+        supervisor = Supervisor(settings, clock, sessions, checkout, toolchain)
         supervisor.sweep_orphans()
         supervisor.interrupt_leftovers()
+        previewer = Previewer(settings, checkout, toolchain)
+        previewer.sweep()
         app.state.settings = settings
         app.state.clock = clock
         app.state.sessions = sessions
         app.state.checkout = checkout
         app.state.supervisor = supervisor
+        app.state.toolchain = toolchain
+        app.state.previewer = previewer
         try:
             yield
         finally:
+            await previewer.shutdown()
             await supervisor.shutdown()
             engine.dispose()
 

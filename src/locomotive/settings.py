@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # A quiet Run's live stream sends a keep-alive this often so proxies don't drop it.
     sse_heartbeat_seconds: float = 15.0
 
+    # Previews must answer within the 10s MCP budget; the helper itself is killed after this long.
+    preview_timeout_seconds: float = 8.0
+
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 

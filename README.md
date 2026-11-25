@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (walking skeleton: start a clean check-mode Run of the default branch and watch its log).
+Status: under construction (launch form with host/task previews; clean Runs of the default branch, check or real, with their log).
 
 ## Layout
 
@@ -38,8 +38,16 @@ LOCOMOTIVE_IDENTITY_HEADER=X-User LOCOMOTIVE_ALLOWLIST=me` and have your browser
 extension) send `X-User: me`.
 
 Each Run exports the resolved commit, runs `mise install` against that checkout's `mise.toml`, installs
-`collections/requirements.yml` into a cache keyed by its sha256, then runs `ansible-runner` (which must be
-provided by the checkout's mise toolchain) in check mode.
+`collections/requirements.yml` into a cache keyed by its sha256, resolves its exact host set, then runs
+`ansible-runner` (which must be provided by the checkout's mise toolchain) with the launch options.
+
+Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
+with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names
+only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventory` is never used.
+
+`uv run pytest` includes seam 2 (`tests/test_smoke_real_ansible.py`): the real helper and one real
+`ansible-runner` Run against `localhost`, with the ansible-core pinned there. It needs `mise` on PATH
+(skipped otherwise) and installs that runtime on first use.
 
 ## Docker
 
