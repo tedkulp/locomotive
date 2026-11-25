@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from locomotive.db import Base, UTCDateTime
@@ -28,6 +28,10 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Per-host ok/changed/skipped/failed/unreachable, set when the Run ends.
+    recap: Mapped[dict | None] = mapped_column(JSON)
+    recap_source: Mapped[str | None] = mapped_column(String(16))  # "ansible" or "locomotive"
+    cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop" or "kill"
 
     @property
     def is_finished(self) -> bool:

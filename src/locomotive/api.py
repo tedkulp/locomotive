@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -13,12 +14,12 @@ from sqlalchemy import select
 
 from locomotive.checkout import PLAYBOOK_NAME, CheckoutError, UnknownBranch
 from locomotive.models import Run
-from locomotive.runlog import RunLog
+from locomotive.rungrid import RunGrid, public_json
+from locomotive.runlog import LogTail, RunLog
 
 router = APIRouter()
 
 SSE_POLL_SECONDS = 0.2
-SSE_HEARTBEAT_SECONDS = 15
 
 
 # ---------------------------------------------------------------------- Playbooks
@@ -77,11 +78,30 @@ def run_json(run: Run) -> dict:
         "started_at": _iso(run.started_at),
         "finished_at": _iso(run.finished_at),
         "duration_seconds": duration,
+        "recap": run.recap,
+        "recap_source": run.recap_source,
+        "stop_requested": run.cancel_request == "stop" and not run.is_finished,
     }
 
 
 @router.post("/runs", status_code=201)
 async def start_run(body: StartRun, request: Request) -> dict:
+    return _launch(request, body, branch=request.app.state.settings.default_branch)
+
+
+@router.post("/runs/{run_id}/again", status_code=201)
+async def run_again(run_id: int, request: Request) -> dict:
+    """A new Run with the settings this one recorded (a clean Run fetches its branch afresh)."""
+    run = _get_run(request, run_id)
+    return _launch(request, _launch_settings(run), branch=run.branch)
+
+
+def _launch_settings(run: Run) -> StartRun:
+    """The launch options a Run recorded, as they'd be sent to POST /runs."""
+    return StartRun(playbook=run.playbook, check=run.check)
+
+
+def _launch(request: Request, body: StartRun, branch: str) -> dict:
     state = request.app.state
     if not PLAYBOOK_NAME.match(body.playbook):
         raise HTTPException(status_code=422, detail=f"invalid Playbook name {body.playbook!r}")
@@ -94,7 +114,7 @@ async def start_run(body: StartRun, request: Request) -> dict:
             status="running",
             source="ui",
             checkout="clean",
-            branch=state.settings.default_branch,
+            branch=branch,
             check=body.check,
             created_at=now,
             started_at=now,
@@ -126,11 +146,42 @@ async def get_run(run_id: int, request: Request) -> dict:
     return run_json(_get_run(request, run_id))
 
 
+@router.post("/runs/{run_id}/stop")
+async def stop_run(run_id: int, request: Request) -> dict:
+    """Stop after this task: the running task finishes on every host, then the Run ends as canceled."""
+    return _control(request, run_id, request.app.state.supervisor.request_stop)
+
+
+@router.post("/runs/{run_id}/kill")
+async def kill_run(run_id: int, request: Request) -> dict:
+    """End the Run now: SIGINT, then SIGKILL, to its process group."""
+    return _control(request, run_id, request.app.state.supervisor.request_kill)
+
+
+def _control(request: Request, run_id: int, action: Callable[[int], bool]) -> dict:
+    run = _get_run(request, run_id)
+    if run.is_finished or not action(run_id):
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not running")
+    return run_json(_get_run(request, run_id))
+
+
+@router.get("/runs/{run_id}/grid")
+async def get_grid(run_id: int, request: Request) -> dict:
+    """The task x host grid and per-host recap, as far as the Run has got."""
+    _get_run(request, run_id)
+    grid = RunGrid.load(request.app.state.supervisor.grid_path(run_id))
+    return public_json(grid.to_json())
+
+
 @router.get("/runs/{run_id}/log")
-async def get_log(run_id: int, request: Request, after: int = 0) -> dict:
+async def get_log(run_id: int, request: Request, after: int = 0, host: str | None = None) -> dict:
+    """The log after line ``after``; with ``host``, only that host's lines plus lines about no host."""
     _get_run(request, run_id)
     path = request.app.state.supervisor.log_path(run_id)
-    return {"lines": [line.__dict__ for line in RunLog.read(path, after)]}
+    lines = RunLog.read(path, after)
+    if host is not None:
+        lines = [line for line in lines if line.host in (None, host)]
+    return {"lines": [line.__dict__ for line in lines]}
 
 
 @router.get("/runs/{run_id}/log/stream")
@@ -139,27 +190,37 @@ async def stream_log(
     request: Request,
     last_event_id: str | None = Header(default=None),
 ) -> StreamingResponse:
-    """Server-Sent Events: one ``log`` event per line (id = seq), then ``end`` once the Run is over."""
+    """Server-Sent Events: one ``log`` event per line (id = seq), a ``grid`` event (the whole grid and
+    recap) whenever it changes, then ``end`` once the Run is over."""
     _get_run(request, run_id)
-    path = request.app.state.supervisor.log_path(run_id)
+    supervisor = request.app.state.supervisor
+    path = supervisor.log_path(run_id)
+    grid_path = supervisor.grid_path(run_id)
     after = int(last_event_id) if last_event_id and last_event_id.isdigit() else 0
+    heartbeat = request.app.state.settings.sse_heartbeat_seconds
 
     async def events() -> AsyncIterator[str]:
         nonlocal after
         idle = 0.0
+        tail = LogTail(path, after)
+        grid_stamp: tuple[int, int, int] | None = None
         while True:
             run = _get_run(request, run_id)  # status first: a finished Run has written its whole log
-            lines = RunLog.read(path, after)
+            lines = tail.read()
             for line in lines:
-                after = line.seq
-                data = json.dumps({"seq": line.seq, "text": line.text, "kind": line.kind})
+                data = json.dumps(line.__dict__)
                 yield f"id: {line.seq}\nevent: log\ndata: {data}\n\n"
+            stamp = _stamp(grid_path)
+            if stamp != grid_stamp:
+                grid_stamp = stamp
+                grid = public_json(RunGrid.load(grid_path).to_json())
+                yield f"event: grid\ndata: {json.dumps(grid)}\n\n"
             if run.is_finished:
                 yield f"event: end\ndata: {json.dumps(run_json(run))}\n\n"
                 return
             if lines:
                 idle = 0.0
-            elif idle >= SSE_HEARTBEAT_SECONDS:
+            elif idle >= heartbeat:
                 idle = 0.0
                 yield ": keep-alive\n\n"
             if await request.is_disconnected():
@@ -172,3 +233,11 @@ async def stream_log(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _stamp(path: Path) -> tuple[int, int, int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return (0, 0, 0)
+    return (st.st_ino, st.st_mtime_ns, st.st_size)

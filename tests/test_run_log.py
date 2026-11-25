@@ -2,7 +2,7 @@
 
 import json
 
-from conftest import wait_for_run, wait_until
+from conftest import sse_events, wait_for_run, wait_until
 
 GATED = {
     "events": [
@@ -15,27 +15,6 @@ GATED = {
 }
 
 
-def sse_events(lines):
-    """Parse an SSE line iterator into (event, id, data) tuples."""
-    event, ident, data = "message", None, []
-    for line in lines:
-        if line == "":
-            if data:
-                yield event, ident, "\n".join(data)
-            event, ident, data = "message", None, []
-        elif line.startswith(":"):
-            continue
-        else:
-            field, _, value = line.partition(":")
-            value = value.removeprefix(" ")
-            if field == "event":
-                event = value
-            elif field == "id":
-                ident = value
-            elif field == "data":
-                data.append(value)
-
-
 def test_the_log_streams_live_while_the_run_is_running(client, stubs):
     stubs.script(runner=GATED)
     run_id = client.post("/api/runs", json={"playbook": "servers.yml"}).json()["id"]
@@ -45,6 +24,8 @@ def test_the_log_streams_live_while_the_run_is_running(client, stubs):
         events = sse_events(resp.iter_lines())
         seen = []
         for event, ident, data in events:
+            if event == "grid":
+                continue
             assert event == "log"
             seen.append(json.loads(data)["text"])
             if "ok: [alpha]" in seen:
@@ -129,3 +110,29 @@ def test_timings_come_from_the_clock(client, stubs, clock):
     assert run["started_at"] == "2026-11-25T12:00:00Z"
     assert run["finished_at"] == "2026-11-25T12:04:12Z"
     assert run["duration_seconds"] == 252
+
+
+def test_a_run_lasting_hours_keeps_streaming_with_keep_alives_while_quiet(start_app, stubs, clock):
+    client = start_app(sse_heartbeat_seconds=0.3)
+    stubs.script(runner=GATED)
+    run_id = client.post("/api/runs", json={"playbook": "servers.yml"}).json()["id"]
+
+    with client.stream("GET", f"/api/runs/{run_id}/log/stream") as resp:
+        lines = resp.iter_lines()
+        for line in lines:
+            if "ok: [alpha]" in line:
+                break
+        clock.advance(hours=6)  # a long, silent task: nothing times the Run out
+        keep_alives = 0
+        for line in lines:
+            if line.startswith(":"):
+                keep_alives += 1
+                if keep_alives == 2:
+                    break
+        assert client.get(f"/api/runs/{run_id}").json()["status"] == "running"
+        stubs.release_gate()
+        rest = list(sse_events(lines))
+
+    assert "ok: [beta]" in [json.loads(d)["text"] for e, _, d in rest if e == "log"]
+    assert rest[-1][0] == "end"
+    assert json.loads(rest[-1][2])["duration_seconds"] == 6 * 3600

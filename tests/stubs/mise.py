@@ -1,4 +1,4 @@
-"""Stub ``mise``: ``install`` follows the scenario; ``exec [-C dir] -- cmd`` runs cmd with the stubs on PATH."""
+"""Stub ``mise``: ``install`` follows the scenario (``mise_install_gate`` blocks it until the gate opens); ``exec [-C dir] -- cmd`` runs cmd with the stubs on PATH."""
 import json
 import os
 import sys
@@ -11,6 +11,10 @@ with open(ROOT / "calls.jsonl", "a") as f:
     f.write(json.dumps({"tool": "mise", "argv": argv, "cwd": os.getcwd()}) + "\n")
 
 if argv[:1] == ["install"]:
+    if scenario.get("mise_install_gate"):
+        import time
+        while not (ROOT / "gate").exists():
+            time.sleep(0.02)
     print(scenario.get("mise_install_output", "mise all tools are installed"))
     sys.exit(scenario.get("mise_install_rc", 0))
 

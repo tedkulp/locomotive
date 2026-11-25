@@ -17,11 +17,13 @@ import shutil
 import signal
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from locomotive.checkout import Checkout, CheckoutError
 from locomotive.clock import Clock
 from locomotive.models import Run
+from locomotive.rungrid import RunGrid
 from locomotive.runlog import RunLog
 from locomotive.settings import Settings
 
@@ -30,8 +32,17 @@ CORE_VERSION = re.compile(r"core ([0-9][0-9A-Za-z.+-]*)")
 POLL_SECONDS = 0.1
 
 
+STOP_PLUGIN_DIR = Path(__file__).parent / "ansible_plugins"
+STOPPED = "Stopped after a task"
+KILLED = "Killed"
+
+
 class RunFailed(Exception):
     """A step failed; the message is the Run's failure reason."""
+
+
+class RunCanceled(Exception):
+    """Stop or Kill was requested before ansible-playbook started."""
 
 
 class Supervisor:
@@ -48,6 +59,9 @@ class Supervisor:
         self._checkout = checkout
         self._tasks: dict[int, asyncio.Task[None]] = {}
         self._collection_locks: dict[str, asyncio.Lock] = {}
+        self._logs: dict[int, RunLog] = {}
+        self._procs: dict[int, asyncio.subprocess.Process] = {}
+        self._cancel: dict[int, str] = {}  # run id -> "stop" | "kill"
 
     # ------------------------------------------------------------------ layout
 
@@ -67,6 +81,9 @@ class Supervisor:
     def log_path(self, run_id: int) -> Path:
         return self.history_dir(run_id) / "log.jsonl"
 
+    def grid_path(self, run_id: int) -> Path:
+        return self.history_dir(run_id) / "grid.json"
+
     # ------------------------------------------------------------------ lifecycle
 
     def sweep_orphans(self) -> None:
@@ -79,10 +96,81 @@ class Supervisor:
                     child.unlink(missing_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
+    def interrupt_leftovers(self) -> None:
+        """At startup nothing is running, so a Run still marked running was cut off. Never retried."""
+        with self._sessions() as session:
+            ids = list(session.scalars(select(Run.id).where(Run.status == "running")))
+        for run_id in ids:
+            reason = "locomotive restarted during the Run"
+            RunLog(self.log_path(run_id)).append(f"Run interrupted: {reason}", kind="locomotive")
+            grid = RunGrid.load(self.grid_path(run_id))
+            grid.finish()
+            grid.save(self.grid_path(run_id))
+            self._update(
+                run_id, status="interrupted", failure_reason=reason, finished_at=self._clock.now(),
+                recap=grid.recap, recap_source=grid.recap_source,
+            )
+
     def start(self, run_id: int) -> None:
+        self._logs[run_id] = RunLog(self.log_path(run_id))
         task = asyncio.create_task(self._supervise(run_id), name=f"run-{run_id}")
         self._tasks[run_id] = task
         task.add_done_callback(lambda _t: self._tasks.pop(run_id, None))
+
+    def stop_file(self, run_id: int) -> Path:
+        """Read by the ``locomotive_stop`` callback plugin as each task starts."""
+        return self.runs_dir / str(run_id) / "stop"
+
+    def request_stop(self, run_id: int) -> bool:
+        """Let the current task finish, then end the Run. False if the Run isn't running here."""
+        if run_id not in self._tasks:
+            return False
+        if self._cancel.get(run_id):
+            return True
+        self._cancel[run_id] = "stop"
+        self._update(run_id, cancel_request="stop")
+        path = self.stop_file(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        self._logs[run_id].append("Stop requested: the Run ends when the current task finishes", kind="locomotive")
+        return True
+
+    def request_kill(self, run_id: int) -> bool:
+        """SIGINT the Run's process group now, SIGKILL it if it outlives the grace period."""
+        if run_id not in self._tasks:
+            return False
+        if self._cancel.get(run_id) == "kill":
+            return True
+        self._cancel[run_id] = "kill"
+        self._update(run_id, cancel_request="kill")
+        self._logs[run_id].append("Kill requested: sending SIGINT", kind="locomotive")
+        proc = self._procs.get(run_id)
+        if proc is not None:
+            self._kill(run_id, proc)
+        return True
+
+    def _kill(self, run_id: int, proc: asyncio.subprocess.Process) -> None:
+        _signal_group(proc.pid, signal.SIGINT)
+        asyncio.create_task(self._escalate(run_id, proc), name=f"kill-{run_id}")
+
+    async def _escalate(self, run_id: int, proc: asyncio.subprocess.Process) -> None:
+        deadline = asyncio.get_running_loop().time() + self._settings.kill_grace_seconds
+        while proc.returncode is None and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(POLL_SECONDS / 2)
+        if proc.returncode is None:
+            log = self._logs.get(run_id)
+            if log is not None:
+                log.append("Still running after SIGINT: sending SIGKILL", kind="locomotive")
+            _signal_group(proc.pid, signal.SIGKILL)
+
+    def _register(self, run_id: int, proc: asyncio.subprocess.Process) -> None:
+        self._procs[run_id] = proc
+        if self._cancel.get(run_id) == "kill":
+            self._kill(run_id, proc)
+
+    def _checkpoint(self, run_id: int) -> None:
+        if self._cancel.get(run_id):
+            raise RunCanceled
 
     async def shutdown(self) -> None:
         for task in list(self._tasks.values()):
@@ -104,35 +192,49 @@ class Supervisor:
     async def _supervise(self, run_id: int) -> None:
         with self._sessions() as session:
             run = session.get_one(Run, run_id)
-        log = RunLog(self.log_path(run_id))
+        log = self._logs[run_id]
+        grid = RunGrid()
         work = self.runs_dir / str(run_id)
         status, reason, rc = "failed", None, None
         try:
-            rc = await self._execute(run, work, log)
+            rc = await self._execute(run, work, log, grid)
             if rc == 0:
                 status = "succeeded"
             else:
                 reason = f"ansible-playbook failed (exit code {rc})"
+        except RunCanceled:
+            pass
         except RunFailed as exc:
             reason = str(exc)
         except asyncio.CancelledError:
-            reason = "locomotive shut down during the Run"
+            status, reason = "interrupted", "locomotive shut down during the Run"
             raise
         except Exception as exc:  # noqa: BLE001 - a bug must still end the Run visibly
             reason = f"internal error: {exc!r}"
         finally:
+            cancel = self._cancel.pop(run_id, None)
+            self._procs.pop(run_id, None)
+            self._logs.pop(run_id, None)
+            # Asked to stop and Ansible never reached its final stats: the Run was cut short on request.
+            if cancel and status != "interrupted" and grid.stats is None:
+                status, reason = "canceled", KILLED if cancel == "kill" else STOPPED
             shutil.rmtree(work, ignore_errors=True)
-            if reason:
-                log.append(f"Run failed: {reason}", kind="locomotive")
-            else:
+            if status == "succeeded":
                 log.append("Run succeeded", kind="locomotive")
+            else:
+                verb = {"canceled": "canceled", "interrupted": "interrupted"}.get(status, "failed")
+                log.append(f"Run {verb}: {reason}", kind="locomotive")
+            grid.finish()
+            grid.save(self.grid_path(run_id))
             self._update(
-                run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now()
+                run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now(),
+                recap=grid.recap, recap_source=grid.recap_source,
             )
 
-    async def _execute(self, run: Run, work: Path, log: RunLog) -> int:
+    async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
         project = work / "project"
 
+        self._checkpoint(run.id)
         log.append(f"Fetching {run.branch} from the remote", kind="locomotive")
         try:
             sha = await self._checkout.fetch(run.branch)
@@ -149,12 +251,17 @@ class Supervisor:
         if not (project / playbook).is_file():
             raise RunFailed(f"Playbook {playbook} does not exist at {sha[:12]}")
 
+        self._checkpoint(run.id)
         log.append("$ mise install", kind="locomotive")
-        code, out = await self._run_tool(["install"], project, log)
+        code, out = await self._run_tool(["install"], project, log, run_id=run.id)
+        self._checkpoint(run.id)
         if code != 0:
             raise RunFailed(f"Runtime install failed: mise install exited {code}{_last_line(out)}")
 
-        code, out = await self._run_tool(["exec", "-C", str(project), "--", "ansible", "--version"], project, None)
+        code, out = await self._run_tool(
+            ["exec", "-C", str(project), "--", "ansible", "--version"], project, None, run_id=run.id
+        )
+        self._checkpoint(run.id)
         match = CORE_VERSION.search(out)
         if code != 0 or not match:
             raise RunFailed(f"Could not determine the ansible-core version{_last_line(out)}")
@@ -162,10 +269,11 @@ class Supervisor:
         log.append(f"ansible-core {match.group(1)}", kind="locomotive")
 
         collections_path = await self._install_collections(run, project, log)
+        self._checkpoint(run.id)
 
         cmdline = ["--check"]
         log.append(f"$ ansible-playbook {playbook} {shlex.join(cmdline)}", kind="locomotive")
-        return await self._run_ansible_runner(run, work, project, playbook, cmdline, collections_path, log)
+        return await self._run_ansible_runner(run, work, project, playbook, cmdline, collections_path, log, grid)
 
     async def _install_collections(self, run: Run, project: Path, log: RunLog) -> Path | None:
         requirements = project / REQUIREMENTS
@@ -189,7 +297,11 @@ class Supervisor:
                  "-r", str(REQUIREMENTS), "-p", str(staging)],
                 project, log,
                 extra_env={"ANSIBLE_COLLECTIONS_PATH": str(staging)},
+                run_id=run.id,
             )
+            if code != 0 and self._cancel.get(run.id):
+                shutil.rmtree(staging, ignore_errors=True)
+                raise RunCanceled
             if code != 0:
                 shutil.rmtree(staging, ignore_errors=True)
                 raise RunFailed(f"Collections install failed: ansible-galaxy exited {code}{_last_line(out)}")
@@ -205,12 +317,19 @@ class Supervisor:
         cmdline: list[str],
         collections_path: Path | None,
         log: RunLog,
+        grid: RunGrid,
     ) -> int:
         artifacts = self.history_dir(run.id) / "artifacts"
         ident = "run"
         env = self._tool_env(project)
         if collections_path is not None:
             env["ANSIBLE_COLLECTIONS_PATH"] = str(collections_path)
+        # Stop after this task: our callback plugin ends Ansible as the next task starts, once the stop
+        # file exists, so no host is left mid-task.
+        env["ANSIBLE_CALLBACK_PLUGINS"] = os.pathsep.join(
+            filter(None, (str(STOP_PLUGIN_DIR), env.get("ANSIBLE_CALLBACK_PLUGINS")))
+        )
+        env["LOCOMOTIVE_STOP_FILE"] = str(self.stop_file(run.id))
         runner_out = self.history_dir(run.id) / "runner.out"
         runner_out.parent.mkdir(parents=True, exist_ok=True)
         with runner_out.open("wb") as out:
@@ -228,7 +347,8 @@ class Supervisor:
                 stdin=asyncio.subprocess.DEVNULL, stdout=out, stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
-            follower = EventFollower(artifacts / ident / "job_events", log)
+            self._register(run.id, proc)
+            follower = EventFollower(artifacts / ident / "job_events", log, grid, self.grid_path(run.id))
             try:
                 while proc.returncode is None:
                     follower.poll()
@@ -262,6 +382,7 @@ class Supervisor:
         project: Path,
         log: RunLog | None,
         extra_env: dict[str, str] | None = None,
+        run_id: int | None = None,
     ) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
             self._settings.mise_bin, *args,
@@ -270,6 +391,8 @@ class Supervisor:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
+        if run_id is not None:
+            self._register(run_id, proc)
         chunks: list[str] = []
         assert proc.stdout is not None
         try:
@@ -286,11 +409,14 @@ class Supervisor:
 
 
 class EventFollower:
-    """Follows the job_events files ansible-runner writes, in counter order, into the Run log."""
+    """Follows the job_events files ansible-runner writes, in counter order, into the Run log and grid."""
 
-    def __init__(self, directory: Path, log: RunLog) -> None:
+    def __init__(self, directory: Path, log: RunLog, grid: RunGrid, grid_path: Path) -> None:
         self._dir = directory
         self._log = log
+        self._grid = grid
+        self._grid_path = grid_path
+        self._saved_version = -1
         self._seen: set[int] = set()
         self._next = 1
 
@@ -299,13 +425,19 @@ class EventFollower:
         return len(self._seen)
 
     def poll(self, final: bool = False) -> None:
+        self._read(final)
+        if self._grid.version != self._saved_version:
+            self._grid.save(self._grid_path)
+            self._saved_version = self._grid.version
+
+    def _read(self, final: bool) -> None:
         if not self._dir.is_dir():
             return
         pending: dict[int, Path] = {}
-        for path in self._dir.glob("*.json"):
-            counter = path.name.split("-", 1)[0]
-            if counter.isdigit() and int(counter) not in self._seen:
-                pending[int(counter)] = path
+        for name in os.listdir(self._dir):
+            counter = name.split("-", 1)[0]
+            if name.endswith(".json") and counter.isdigit() and int(counter) not in self._seen:
+                pending[int(counter)] = self._dir / name
         for counter in sorted(pending):
             if counter != self._next and not final:
                 break  # wait for the gap to fill so the log keeps Ansible's order
@@ -317,13 +449,19 @@ class EventFollower:
                 break
             self._seen.add(counter)
             self._next = counter + 1
+            self._grid.apply(event)
             if event.get("stdout"):
-                self._log.append(event["stdout"], kind="ansible")
+                host = (event.get("event_data") or {}).get("host")
+                self._log.append(event["stdout"], kind="ansible", host=host)
 
 
 def _kill_group(pid: int) -> None:
+    _signal_group(pid, signal.SIGKILL)
+
+
+def _signal_group(pid: int, sig: signal.Signals) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, signal.SIGKILL)
+        os.killpg(pid, sig)
 
 
 NOISE = ("Run with --verbose", "mise ERROR Version:")

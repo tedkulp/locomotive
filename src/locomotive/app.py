@@ -27,6 +27,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         checkout = Checkout(settings)
         supervisor = Supervisor(settings, clock, sessions, checkout)
         supervisor.sweep_orphans()
+        supervisor.interrupt_leftovers()
         app.state.settings = settings
         app.state.clock = clock
         app.state.sessions = sessions

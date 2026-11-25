@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Toolchain used for every Run (the checkout's own mise.toml decides versions).
     mise_bin: str = "mise"
 
+    # Kill sends SIGINT to a Run's process group, then SIGKILL if it is still alive after this long.
+    kill_grace_seconds: float = 10.0
+
+    # A quiet Run's live stream sends a keep-alive this often so proxies don't drop it.
+    sse_heartbeat_seconds: float = 15.0
+
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 

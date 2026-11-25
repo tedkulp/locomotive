@@ -1,11 +1,19 @@
 """Stub ``ansible-runner run``: writes scripted job_events, stdout, rc and status like the real one.
 
-Scenario key ``runner``: {"events": [...], "rc": 0, "status": "successful", "gate_after": N}
+Scenario key ``runner``: {"events": [...], "rc": 0, "status": "successful", "gate_after": N, "ignore_sigint": false}
 With ``gate_after`` it blocks after writing N events until the ``gate`` file exists.
+
+Like the real pair it stands in for:
+- SIGINT is ansible-runner's cancel: it kills Ansible and exits 254 with status ``canceled``
+  (``ignore_sigint`` makes it a runner that hangs instead, so only SIGKILL ends it);
+- when locomotive's ``locomotive_stop`` callback plugin is on ``ANSIBLE_CALLBACK_PLUGINS`` and the file
+  named by ``LOCOMOTIVE_STOP_FILE`` exists as a task starts, Ansible ends with "User interrupted
+  execution" (exit 99) before that task runs on any host. No stats are written in either case.
 """
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 import uuid
@@ -40,6 +48,28 @@ with open(ROOT / "calls.jsonl", "a") as f:
     }) + "\n")
 
 conf = scenario.get("runner", {})
+
+
+def record_signal(signum, _frame):
+    with open(ROOT / "calls.jsonl", "a") as f:
+        f.write(json.dumps({"tool": "signal", "signal": signal.Signals(signum).name}) + "\n")
+    if conf.get("ignore_sigint"):
+        return
+    finish(254, "canceled")
+
+
+def finish(rc, status):
+    (art / "rc").write_text(str(rc))
+    (art / "status").write_text(status)
+    sys.exit(rc)
+
+
+def stop_requested():
+    plugin_dirs = [d for d in os.environ.get("ANSIBLE_CALLBACK_PLUGINS", "").split(os.pathsep) if d]
+    loaded = any((Path(d) / "locomotive_stop.py").is_file() for d in plugin_dirs)
+    stop_file = os.environ.get("LOCOMOTIVE_STOP_FILE")
+    return loaded and bool(stop_file) and Path(stop_file).exists()
+
 events = conf.get("events") or [
     {"event": "playbook_on_start", "stdout": ""},
     {"event": "playbook_on_play_start", "stdout": "\nPLAY [servers] *****"},
@@ -49,6 +79,7 @@ events = conf.get("events") or [
 ]
 art = Path(args.artifact_dir or Path(args.private_data_dir) / "artifacts") / args.ident
 (art / "job_events").mkdir(parents=True, exist_ok=True)
+signal.signal(signal.SIGINT, record_signal)
 stdout = open(art / "stdout", "w")
 line = 0
 for counter, ev in enumerate(events, start=1):
@@ -73,8 +104,9 @@ for counter, ev in enumerate(events, start=1):
     if text:
         stdout.write(text + "\n")
         stdout.flush()
+    if ev["event"] in ("playbook_on_task_start", "playbook_on_handler_task_start") and stop_requested():
+        print("ERROR! User interrupted execution", file=sys.stderr)
+        finish(99, "failed")
     time.sleep(conf.get("delay", 0))
 rc = conf.get("rc", 0)
-(art / "rc").write_text(str(rc))
-(art / "status").write_text(conf.get("status", "successful" if rc == 0 else "failed"))
-sys.exit(rc)
+finish(rc, conf.get("status", "successful" if rc == 0 else "failed"))

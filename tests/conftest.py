@@ -317,19 +317,35 @@ def make_settings(
 
 
 @pytest.fixture
-def start_app(
-    make_settings: Callable[..., Settings], clock: FakeClock
-) -> Iterator[Callable[..., httpx.Client]]:
+def app_servers() -> Iterator[list[AppServer]]:
     servers: list[AppServer] = []
+    yield servers
+    for server in reversed(servers):
+        if server.thread.is_alive():
+            server.__exit__(None, None, None)
 
+
+@pytest.fixture
+def start_app(
+    make_settings: Callable[..., Settings], clock: FakeClock, app_servers: list[AppServer]
+) -> Callable[..., httpx.Client]:
     def start(**overrides: Any) -> httpx.Client:
         server = AppServer(make_settings(**overrides), clock)
-        servers.append(server)
+        app_servers.append(server)
         return server.__enter__()
 
-    yield start
-    for server in reversed(servers):
+    return start
+
+
+@pytest.fixture
+def stop_app(app_servers: list[AppServer]) -> Callable[[httpx.Client], None]:
+    """Shut down (gracefully, as on ``docker stop``) the app instance behind ``client``."""
+
+    def stop(client: httpx.Client) -> None:
+        [server] = [s for s in app_servers if s.client is client]
         server.__exit__(None, None, None)
+
+    return stop
 
 
 @pytest.fixture
@@ -360,3 +376,24 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 10) -> None:
         if time.monotonic() > deadline:
             raise AssertionError("condition not met in time")
         time.sleep(0.05)
+
+
+def sse_events(lines):
+    """Parse an SSE line iterator into (event, id, data) tuples."""
+    event, ident, data = "message", None, []
+    for line in lines:
+        if line == "":
+            if data:
+                yield event, ident, "\n".join(data)
+            event, ident, data = "message", None, []
+        elif line.startswith(":"):
+            continue
+        else:
+            field, _, value = line.partition(":")
+            value = value.removeprefix(" ")
+            if field == "event":
+                event = value
+            elif field == "id":
+                ident = value
+            elif field == "data":
+                data.append(value)
