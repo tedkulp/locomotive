@@ -189,7 +189,9 @@ class Notifier:
         return True if schedule is None else schedule.notify_on_changes
 
     def _click(self, run: Run) -> str | None:
-        base = self._settings.public_url
+        base = self._settings.public_url or (
+            f"https://{self._settings.public_hostname}" if self._settings.public_hostname else None
+        )
         return f"{base.rstrip('/')}/runs/{run.id}" if base else None
 
 

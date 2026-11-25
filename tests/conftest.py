@@ -15,6 +15,8 @@ running the app in a background thread).
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -30,8 +32,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 import uvicorn
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp_types import CallToolResult
 
 from locomotive.app import create_app
 from locomotive.settings import Settings
@@ -40,6 +46,15 @@ STUBS_SRC = Path(__file__).parent / "stubs"
 
 IDENTITY_HEADER = "Tailscale-User-Login"
 IDENTITY = "ted@example.invalid"
+
+# MCP bearer tokens: the app is configured with their sha256 only, each named for its source.
+LXC_TOKEN = "lxc-0123456789abcdef0123456789abcdef"
+MAC_TOKEN = "mac-fedcba9876543210fedcba9876543210"
+PUBLIC_HOSTNAME = "locomotive.example.invalid"
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 # --------------------------------------------------------------------------- clock
@@ -380,6 +395,8 @@ def make_settings(
             "trusted_proxy_ips": ["127.0.0.1"],
             "identity_header": IDENTITY_HEADER,
             "allowlist": [IDENTITY],
+            "mcp_tokens": [f"lxc={token_hash(LXC_TOKEN)}", f"mac={token_hash(MAC_TOKEN)}"],
+            "public_hostname": PUBLIC_HOSTNAME,
         }
         values.update(overrides)
         return Settings(**values)
@@ -437,6 +454,73 @@ def anonymous() -> Iterator[Callable[..., httpx.Client]]:
     yield make
     for c in made:
         c.close()
+
+
+# --------------------------------------------------------------------------- MCP
+
+
+class McpCaller:
+    """The official MCP client over streamable HTTP, one session per call, used synchronously.
+
+    It sends ``Host: PUBLIC_HOSTNAME`` (as Traefik would pass it) unless ``host`` says otherwise.
+    """
+
+    def __init__(
+        self, base_url: str, token: str | None, host: str | None = PUBLIC_HOSTNAME,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.host = host
+        self.headers = headers or {}
+
+    def session(self, fn: Callable[[Client], Any]) -> Any:
+        async def go() -> Any:
+            headers = dict(self.headers)
+            if self.token is not None:
+                headers["Authorization"] = f"Bearer {self.token}"
+            if self.host is not None:
+                headers["Host"] = self.host
+            async with httpx2.AsyncClient(headers=headers, timeout=30) as http:
+                transport = streamable_http_client(f"{self.base_url}/mcp", http_client=http)
+                async with Client(transport, read_timeout_seconds=30) as mcp:
+                    return await fn(mcp)
+
+        return asyncio.run(go())
+
+    def tool_names(self) -> set[str]:
+        async def names(mcp: Client) -> set[str]:
+            return {tool.name for tool in (await mcp.list_tools()).tools}
+
+        return self.session(names)
+
+    def call(self, tool: str, **arguments: Any) -> CallToolResult:
+        async def call(mcp: Client) -> CallToolResult:
+            return await mcp.call_tool(tool, arguments)
+
+        return self.session(call)
+
+    def ok(self, tool: str, **arguments: Any) -> Any:
+        """The tool's structured result; fails the test if the tool reported an error."""
+        result = self.call(tool, **arguments)
+        assert not result.is_error, _text(result)
+        return result.structured_content
+
+    def error(self, tool: str, **arguments: Any) -> str:
+        """The error text the tool reported; fails the test if it succeeded."""
+        result = self.call(tool, **arguments)
+        assert result.is_error, result.structured_content
+        return _text(result)
+
+
+def _text(result: CallToolResult) -> str:
+    return "\n".join(getattr(block, "text", "") for block in result.content)
+
+
+@pytest.fixture
+def mcp(client: httpx.Client) -> McpCaller:
+    """An MCP client with the ``lxc`` token, to the app behind ``client``."""
+    return McpCaller(str(client.base_url), LXC_TOKEN)
 
 
 # --------------------------------------------------------------------------- helpers

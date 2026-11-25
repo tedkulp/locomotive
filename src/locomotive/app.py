@@ -6,12 +6,14 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from starlette.routing import Route
 
 from locomotive import api, schedules
 from locomotive.checkout import Checkout
 from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
 from locomotive.guard import AccessGuard, parse_networks
+from locomotive.mcp_server import MCP_PATH, create_mcp
 from locomotive.notifier import Notifier
 from locomotive.settings import Settings
 from locomotive.preview import Previewer
@@ -54,7 +56,8 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         app.state.notifier = notifier
         scheduler.start()
         try:
-            yield
+            async with mcp.session_manager.run():
+                yield
         finally:
             await scheduler.shutdown()
             await previewer.shutdown()
@@ -65,8 +68,11 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
     app = FastAPI(title="locomotive", lifespan=lifespan)
     parse_networks(settings.trusted_proxy_ips)  # a bad entry stops startup, not the first request
     app.add_middleware(AccessGuard, settings=settings)
-    app.include_router(api.router, prefix="/api")
-    app.include_router(schedules.router, prefix="/api")
+    api_routers = [api.router, schedules.router]
+    for router in api_routers:
+        app.include_router(router, prefix="/api")
+    mcp, mcp_app = create_mcp(app, settings, api_routers)  # a bad token entry stops startup too
+    app.router.routes.append(Route(MCP_PATH, endpoint=mcp_app))  # before the frontend's catch-all
     if settings.static_dir is not None:
         _mount_frontend(app, settings.static_dir)
     return app

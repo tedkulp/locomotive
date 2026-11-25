@@ -44,6 +44,8 @@ def test_every_deployment_value_is_read_from_env(monkeypatch, tmp_path):
         "LOCOMOTIVE_NTFY_TOKEN": "tk",
         "LOCOMOTIVE_HEALTHCHECKS_URL": "https://hc.example.invalid/ping/x",
         "LOCOMOTIVE_HIDDEN_PLAYBOOKS": "a.yml,b.yml",
+        "LOCOMOTIVE_MCP_TOKENS": f"lxc={'a' * 64}, mac={'b' * 64}",
+        "LOCOMOTIVE_PUBLIC_HOSTNAME": "controller.example.invalid",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -62,6 +64,8 @@ def test_every_deployment_value_is_read_from_env(monkeypatch, tmp_path):
     )
     assert s.healthchecks_url == "https://hc.example.invalid/ping/x"
     assert s.hidden_playbooks == ["a.yml", "b.yml"]
+    assert s.mcp_tokens == [f"lxc={'a' * 64}", f"mac={'b' * 64}"]
+    assert s.public_hostname == "controller.example.invalid"
 
 
 def test_repo_url_and_data_dir_are_required(monkeypatch):

@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping).
+Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping; MCP server).
 
 ## Layout
 
@@ -75,7 +75,7 @@ scheduled Run that changed hosts at priority 3 when its Schedule's notify-on-cha
 hand-started and MCP Runs, canceled Runs and skipped firings stay silent. Titles: `<Playbook> failed` /
 `<Playbook> interrupted` / `<Playbook>: changes on N hosts` / `<Schedule> missed`. The body has the source,
 check mode, short SHA (or "working copy"), duration, failed/unreachable/changed hosts with counts and the first
-failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<id>` when that is set. A failed
+failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<id>` (default `https://LOCOMOTIVE_PUBLIC_HOSTNAME`). A failed
 delivery is retried 3 times (backoff `LOCOMOTIVE_NTFY_RETRY_SECONDS`, doubling), then recorded on the Run
 (`notification` in `GET /api/runs/<id>`, shown on the Run page); the Run's own outcome never changes.
 
@@ -86,6 +86,24 @@ only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventor
 `uv run pytest` includes seam 2 (`tests/test_smoke_real_ansible.py`): the real helper and one real
 `ansible-runner` Run against `localhost`, with the ansible-core pinned there. It needs `mise` on PATH
 (skipped otherwise) and installs that runtime on first use.
+
+MCP: `/mcp` is an MCP server (official `mcp` SDK, streamable HTTP) for Claude Code and other clients
+that can send a header. Each client gets a static bearer token; locomotive stores only its sha256, as
+`LOCOMOTIVE_MCP_TOKENS=lxc=<sha256>,mac=<sha256>` (make one with `openssl rand -hex 32`, hash it with
+`printf %s "$TOKEN" | sha256sum`). A missing or unknown token is a 401 (no OAuth), and a Run a token
+starts shows `mcp:<name>` as its source. `LOCOMOTIVE_PUBLIC_HOSTNAME` is the hostname clients use: MCP's
+DNS-rebinding check accepts it (and localhost) in `Host`/`Origin` and answers 421 to anything else.
+Tools: `list_playbooks`, `list_branches`, `working_copy_status`, `list_schedules`, `get_inventory`,
+`list_tags`, `preview_hosts`, `preview_tasks`, `list_runs`, `get_run`, `start_run` (check by default; a
+real Run needs `confirm: true`; `source: clean | working_copy`, `branch`; returns the queued or running
+Run at once), `tail_run_output(run_id, cursor)` and `wait_for_run(run_id, max_seconds <= 30)`. Each
+tool adapts the HTTP API in-process, so it validates and fails exactly as the UI does, and answers
+within `LOCOMOTIVE_MCP_TOOL_BUDGET_SECONDS` (default 9) except `wait_for_run`, which takes what it is asked for
+(default 8s).
+
+```sh
+claude mcp add --transport http locomotive https://<public hostname>/mcp --header "Authorization: Bearer $TOKEN"
+```
 
 ## Docker
 

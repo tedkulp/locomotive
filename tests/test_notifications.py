@@ -8,7 +8,7 @@ import socket
 
 import pytest
 
-from conftest import preview_for, wait_for_run, wait_until
+from conftest import LXC_TOKEN, PUBLIC_HOSTNAME, McpCaller, preview_for, wait_for_run, wait_until
 from test_run_grid import changed, result, stats, task
 from test_schedules import BLOCKED, create, entries, local, tick
 
@@ -340,6 +340,7 @@ def test_a_working_copy_run_says_working_copy_instead_of_a_sha(start_app, fake_h
     stubs.script(runner=FAILING)
     app = start_app(
         ntfy_url=fake_http.url, ntfy_topic=TOPIC, ntfy_token=TOKEN, working_copy_path=working_copy.path,
+        public_hostname=None,
     )
 
     run = wait_for_run(app, launch(app, checkout="working_copy"))
@@ -440,3 +441,35 @@ def test_without_ntfy_configured_nothing_is_sent_and_runs_are_unaffected(start_a
     assert run["status"] == "failed"
     assert app.get(f"/api/runs/{run['id']}").json()["notification"] is None
     assert fake_http.requests == []
+
+
+def test_without_a_public_url_the_click_through_uses_the_public_hostname(start_app, fake_http, stubs):
+    app = start_app(ntfy_url=fake_http.url, ntfy_topic=TOPIC, ntfy_token=TOKEN, ntfy_retry_seconds=0.01)
+    stubs.script(runner=FAILING)
+
+    run_id = launch(app)
+    wait_until(lambda: len(sent(fake_http)) == 1)
+    assert sent(fake_http)[0]["click"] == f"https://{PUBLIC_HOSTNAME}/runs/{run_id}"
+
+
+# --------------------------------------------------------------------------- MCP Runs
+
+
+def test_a_successful_mcp_run_stays_silent_and_a_failed_one_notifies(app, stubs, fake_http):
+    mcp = McpCaller(str(app.base_url), LXC_TOKEN)
+    stubs.script(runner={"events": [
+        task("Install packages", "t1"), changed("alpha", "t1"), stats(alpha=(1, 1, 0, 0, 0)),
+    ]})
+    quiet = mcp.ok("start_run", playbook="servers.yml")
+    assert wait_for_run(app, quiet["id"])["status"] == "succeeded"
+
+    stubs.script(runner=FAILING)
+    failing = mcp.ok("start_run", playbook="servers.yml")
+    assert wait_for_run(app, failing["id"])["status"] == "failed"
+
+    wait_until(lambda: len(sent(fake_http)) == 1)
+    [message] = sent(fake_http)
+    assert message["title"] == "servers.yml failed"
+    assert message["priority"] == 4
+    assert message["message"].splitlines()[0] == "Source: mcp:lxc"
+    assert app.get(f"/api/runs/{quiet['id']}").json()["notification"] is None
