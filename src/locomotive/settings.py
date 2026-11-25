@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     working_copy_path: Path | None = None
     hidden_playbooks: CommaList = []
 
-    # Access guard (enforced by a later ticket; listed so nothing is hardcoded).
+    # Access guard (see guard.py). Fails closed: unset means no peer / no identity gets in.
+    # Trusted proxies are addresses or networks (10.0.0.1, 10.0.0.0/24).
     trusted_proxy_ips: CommaList = []
     identity_header: str | None = None
     allowlist: CommaList = []
