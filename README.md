@@ -47,7 +47,8 @@ it at once), resolves its exact host set, then starts when no running Run holds 
 earlier-launched queued Run shares one (so no Run is starved). Meanwhile its `stage` says `preparing` (fetching, installing, resolving hosts) or `waiting` (for hosts, with
 `waiting_for`); it is null once the Run leaves the queue; `POST
 /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
-they were queued with. A Working Copy Run re-resolves its hosts as it starts and waits again on a new overlap.
+they were queued with. A Working Copy Run re-resolves its hosts as it starts (first preparing its toolchain again if its
+`mise.toml` or `collections/requirements.yml` changed while it was queued) and waits again on a new overlap.
 
 Working Copy Runs (`checkout: "working_copy"`, needs `LOCOMOTIVE_WORKING_COPY_PATH`) run in place in that
 clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty flag, `git diff HEAD` (capped at

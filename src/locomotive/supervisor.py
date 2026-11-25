@@ -27,7 +27,15 @@ from locomotive.models import Run
 from locomotive.notifier import Notifier
 from locomotive.rungrid import RunGrid
 from locomotive.runlog import RunLog
-from locomotive.runtime import Runtime, Toolchain, ToolchainError, kill_group, last_line, signal_group
+from locomotive.runtime import (
+    REQUIREMENTS,
+    Runtime,
+    Toolchain,
+    ToolchainError,
+    kill_group,
+    last_line,
+    signal_group,
+)
 from locomotive.settings import Settings
 from locomotive.working_copy import WorkingCopy, WorkingCopyUnavailable
 
@@ -341,6 +349,25 @@ class Supervisor:
             raise RunFailed(f"Playbook {playbook} does not exist {where}")
 
         self._checkpoint(run.id)
+        runtime = await self._prepare(run, project, log)
+
+        options = launch_options(run)
+        fresh = run.hosts is None
+        if fresh:
+            hosts = await self._resolve_hosts(run, runtime, options, log)
+            self._update(run.id, hosts=hosts)
+        else:
+            hosts = list(run.hosts or [])
+            log.append(f"Hosts ({len(hosts)}), fixed when the Run was queued: {', '.join(hosts)}", kind="locomotive")
+        self._checkpoint(run.id)
+
+        runtime = await self._acquire(run, hosts, fresh, runtime, options, log)
+
+        log.append(f"$ {options.command()}", kind="locomotive")
+        return await self._run_ansible_runner(run, work, runtime, playbook, options.cmdline(), log, grid)
+
+    async def _prepare(self, run: Run, project: Path, log: RunLog) -> Runtime:
+        """The checkout's toolchain: mise install, ansible-core, collections (see ``Toolchain.prepare``)."""
         try:
             runtime = await self._toolchain.prepare(
                 project,
@@ -354,34 +381,34 @@ class Supervisor:
                 raise RunCanceled from exc
             raise RunFailed(str(exc)) from exc
         self._checkpoint(run.id)
-
-        options = launch_options(run)
-        fresh = run.hosts is None
-        if fresh:
-            hosts = await self._resolve_hosts(run, runtime, options, log)
-            self._update(run.id, hosts=hosts)
-        else:
-            hosts = list(run.hosts or [])
-            log.append(f"Hosts ({len(hosts)}), fixed when the Run was queued: {', '.join(hosts)}", kind="locomotive")
-        self._checkpoint(run.id)
-
-        await self._acquire(run, hosts, fresh, runtime, options, log)
-
-        log.append(f"$ {options.command()}", kind="locomotive")
-        return await self._run_ansible_runner(run, work, runtime, playbook, options.cmdline(), log, grid)
+        return runtime
 
     async def _acquire(
         self, run: Run, hosts: list[str], fresh: bool, runtime: Runtime, options: LaunchOptions, log: RunLog
-    ) -> None:
+    ) -> Runtime:
         """Wait until no running Run holds one of ``hosts`` and no earlier queued Run shares one, then
-        take them (status running). The check and the take happen with no await between them."""
+        take them (status running). The check and the take happen with no await between them.
+
+        A Working Copy Run's toolchain is prepared again first if its ``mise.toml`` or collections
+        requirements changed since it was prepared. Returns the runtime the Run uses."""
         waiting_for: int | None = None
         recorded = False  # Working Copy state recorded since the Run last waited
+        prepared = toolchain_files(runtime.project) if run.checkout == "working_copy" else None
         while True:
             changed = self._queue_changed
             self._checkpoint(run.id)
             blocker, held = self._blocker(run.id, hosts)
             if blocker is None:
+                if prepared is not None and toolchain_files(runtime.project) != prepared:
+                    log.append(
+                        "The Working Copy's mise.toml or collections/requirements.yml changed while the Run was "
+                        "queued: preparing its toolchain again",
+                        kind="locomotive",
+                    )
+                    runtime = await self._prepare(run, runtime.project, log)
+                    prepared = toolchain_files(runtime.project)  # (a change during it is caught next time round)
+                    fresh = recorded = False  # its hosts, resolved with the new runtime
+                    continue
                 if resolves_hosts_at_start(run) and not fresh:
                     hosts = await self._resolve_hosts(run, runtime, options, log)
                     self._update(run.id, hosts=hosts)
@@ -396,7 +423,7 @@ class Supervisor:
                 self._update(run.id, status="running", started_at=self._clock.now(), waiting_for=None)
                 if waiting_for is not None:
                     log.append("Hosts are free; starting", kind="locomotive")
-                return
+                return runtime
             fresh = recorded = False
             if blocker.id != waiting_for:
                 waiting_for = blocker.id
@@ -651,6 +678,20 @@ class EventFollower:
                 self._log.append(event["stdout"], kind="ansible", host=host)
             if self._consume:
                 pending[counter].unlink(missing_ok=True)
+
+
+TOOLCHAIN_FILES = (Path("mise.toml"), REQUIREMENTS)
+
+
+def toolchain_files(project: Path) -> dict[str, bytes | None]:
+    """What a toolchain is prepared from: the checkout's mise.toml and collections requirements."""
+    contents: dict[str, bytes | None] = {}
+    for rel in TOOLCHAIN_FILES:
+        try:
+            contents[str(rel)] = (project / rel).read_bytes()
+        except OSError:
+            contents[str(rel)] = None
+    return contents
 
 
 def launch_options(run: Run) -> LaunchOptions:

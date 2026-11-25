@@ -321,3 +321,51 @@ def test_a_queued_run_says_whether_it_is_preparing_or_waiting_for_hosts(client, 
     stubs.release_gate("a")
     done = wait_for_run(client, second["id"])
     assert done["stage"] is None
+
+
+def test_a_working_copy_run_prepares_its_toolchain_again_if_mise_toml_changed_while_it_waited(
+    start_app, working_copy, stubs
+):
+    import hashlib
+
+    client = start_app(working_copy_path=working_copy.path)
+    hosts_scenario(stubs, alpha="a")
+    stubs.script(version_from_mise_toml=True)
+    holder = launch(client, "alpha")
+    wait_status(client, holder, "running")
+    working = launch(client, "alpha", checkout="working_copy")
+    assert wait_waiting(client, working)["ansible_core_version"] == "2.22.0"
+
+    # While it waits, Ted bumps ansible-core and the collections in the Working Copy.
+    requirements = "---\ncollections:\n  - name: community.docker\n"
+    working_copy.write({
+        "mise.toml": '[tools]\n"pipx:ansible-core" = "2.23.1"\n',
+        "collections/requirements.yml": requirements,
+    })
+    stubs.release_gate("a")
+
+    run = wait_for_run(client, working)
+    assert run["status"] == "succeeded", run["failure_reason"]
+    assert run["ansible_core_version"] == "2.23.1"
+    assert run["requirements_hash"] == hashlib.sha256(requirements.encode()).hexdigest()
+    installs = [c for c in stubs.calls("mise") if c["argv"][:1] == ["install"] and c["cwd"] == str(working_copy.path)]
+    assert len(installs) == 2
+    log = [line["text"] for line in client.get(f"/api/runs/{working}/log").json()["lines"]]
+    assert any("changed while the Run was queued" in t for t in log)
+
+
+def test_a_working_copy_run_whose_toolchain_files_did_not_change_is_not_prepared_again(
+    start_app, working_copy, stubs
+):
+    client = start_app(working_copy_path=working_copy.path)
+    hosts_scenario(stubs, alpha="a")
+    holder = launch(client, "alpha")
+    wait_status(client, holder, "running")
+    working = launch(client, "alpha", checkout="working_copy")
+    wait_waiting(client, working)
+    working_copy.write({"README.md": "edited while queued\n"})
+    stubs.release_gate("a")
+
+    assert wait_for_run(client, working)["status"] == "succeeded"
+    installs = [c for c in stubs.calls("mise") if c["argv"][:1] == ["install"] and c["cwd"] == str(working_copy.path)]
+    assert len(installs) == 1
