@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of the default branch, check or real, with their log).
+Status: under construction (launch form with host/task previews; clean Runs of the default branch, check or real, with their log; per-host queue).
 
 ## Layout
 
@@ -40,6 +40,13 @@ extension) send `X-User: me`.
 Each Run exports the resolved commit, runs `mise install` against that checkout's `mise.toml`, installs
 `collections/requirements.yml` into a cache keyed by its sha256, resolves its exact host set, then runs
 `ansible-runner` (which must be provided by the checkout's mise toolchain) with the launch options.
+
+Per-host queue: two Runs never touch the same host at once (whatever started them, check mode included).
+A Run is `queued` from launch until it holds its hosts: it fetches and fixes its SHA (a failed fetch fails
+it at once), resolves its exact host set, then starts when no running Run holds one of its hosts and no
+earlier-launched queued Run shares one (so no Run is starved). Meanwhile it shows `waiting_for`; `POST
+/api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
+they were queued with. A Working Copy Run re-resolves its hosts as it starts and waits again on a new overlap.
 
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names

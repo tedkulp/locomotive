@@ -86,6 +86,7 @@ def test_runs_appear_in_the_recent_runs_list_newest_first_while_running(client, 
     first = wait_for_run(client, client.post("/api/runs", json={"playbook": "docker.yml"}).json()["id"])
     stubs.script(runner=GATED)
     second_id = client.post("/api/runs", json={"playbook": "servers.yml"}).json()["id"]
+    wait_until(lambda: len(stubs.calls("ansible-runner")) == 2)
 
     runs = client.get("/api/runs").json()["runs"]
 

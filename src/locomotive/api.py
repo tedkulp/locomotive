@@ -115,6 +115,7 @@ def run_json(run: Run) -> dict:
         "recap": run.recap,
         "recap_source": run.recap_source,
         "stop_requested": run.cancel_request == "stop" and not run.is_finished,
+        "waiting_for": run.waiting_for if run.status == "queued" else None,
     }
 
 
@@ -146,7 +147,8 @@ def _launch(request: Request, body: LaunchOptions, branch: str) -> dict:
     with state.sessions() as session:
         run = Run(
             playbook=body.playbook,
-            status="running",
+            # Queued until its SHA and host set are fixed and no other Run holds (or is ahead for) a host.
+            status="queued",
             source="ui",
             checkout="clean",
             branch=branch,
@@ -157,7 +159,6 @@ def _launch(request: Request, body: LaunchOptions, branch: str) -> dict:
             tags=body.tags,
             extra_vars=body.extra_vars,
             created_at=now,
-            started_at=now,
         )
         session.add(run)
         session.commit()
@@ -196,6 +197,15 @@ async def stop_run(run_id: int, request: Request) -> dict:
 async def kill_run(run_id: int, request: Request) -> dict:
     """End the Run now: SIGINT, then SIGKILL, to its process group."""
     return _control(request, run_id, request.app.state.supervisor.request_kill)
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: int, request: Request) -> dict:
+    """Take a queued Run out of the queue before it touches a host; it ends as canceled."""
+    run = _get_run(request, run_id)
+    if run.status != "queued" or not request.app.state.supervisor.request_cancel(run_id):
+        raise HTTPException(status_code=409, detail=f"Run {run_id} is not queued")
+    return run_json(_get_run(request, run_id))
 
 
 def _control(request: Request, run_id: int, action: Callable[[int], bool]) -> dict:

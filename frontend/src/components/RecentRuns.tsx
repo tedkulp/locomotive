@@ -33,7 +33,9 @@ export function RecentRuns() {
               <SourceBadge run={run} />
               <ModeBadge run={run} />
               <CheckoutBadge run={run} />
-              <span className="ml-auto text-xs text-muted-foreground">{runDuration(run, now)}</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {run.waiting_for ? `waiting for #${run.waiting_for.id}` : runDuration(run, now)}
+              </span>
             </div>
           </NavLink>
         ))}

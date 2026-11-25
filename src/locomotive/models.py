@@ -38,7 +38,9 @@ class Run(Base):
     # Per-host ok/changed/skipped/failed/unreachable, set when the Run ends.
     recap: Mapped[dict | None] = mapped_column(JSON)
     recap_source: Mapped[str | None] = mapped_column(String(16))  # "ansible" or "locomotive"
-    cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop" or "kill"
+    cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop", "kill" or "cancel"
+    # While queued: the Run it waits for, {"id", "playbook"} (the first one holding or ahead of its hosts).
+    waiting_for: Mapped[dict | None] = mapped_column(JSON)
 
     @property
     def is_finished(self) -> bool:

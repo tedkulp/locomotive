@@ -1,7 +1,8 @@
 """Stub for the Python interpreter of the checkout's ansible-core, as used to run the preview helper.
 
 ``python -I <helper> < request.json``: records the request and answers with scenario key ``preview``
-(the helper's JSON reply), ``preview_rc`` / ``preview_stderr`` to fail, ``preview_delay`` to be slow.
+(the helper's JSON reply; ``previews`` maps a request's limit, "" for none, to a reply used instead),
+``preview_rc`` / ``preview_stderr`` to fail, ``preview_delay`` to be slow.
 """
 import json
 import os
@@ -38,4 +39,5 @@ default = {
     "tags": [],
     "groups": [{"name": "servers", "children": [], "hosts": hosts}],
 }
-print(json.dumps(scenario.get("preview", default)))
+reply = scenario.get("previews", {}).get(request.get("limit") or "", scenario.get("preview", default))
+print(json.dumps(reply))

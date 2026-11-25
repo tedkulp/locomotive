@@ -184,8 +184,8 @@ class Stubs:
         calls = [json.loads(line) for line in path.read_text().splitlines() if line]
         return [c for c in calls if tool is None or c["tool"] == tool]
 
-    def release_gate(self) -> None:
-        (self.root / "gate").touch()
+    def release_gate(self, name: str = "gate") -> None:
+        (self.root / name).touch()
 
 
 @pytest.fixture

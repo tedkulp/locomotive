@@ -1,7 +1,8 @@
 """Stub ``ansible-runner run``: writes scripted job_events, stdout, rc and status like the real one.
 
-Scenario key ``runner``: {"events": [...], "rc": 0, "status": "successful", "gate_after": N, "ignore_sigint": false}
-With ``gate_after`` it blocks after writing N events until the ``gate`` file exists.
+Scenario key ``runner``: {"events": [...], "rc": 0, "status": "successful", "gate_after": N, "gate": "gate", "ignore_sigint": false}
+With ``gate_after`` it blocks after writing N events until the file named by ``gate`` (default ``gate``) exists.
+``runner_by_limit`` maps a Run's ``--limit`` to a ``runner`` scenario used instead, so Runs can differ.
 
 Like the real pair it stands in for:
 - SIGINT is ansible-runner's cancel: it kills Ansible and exits 254 with status ``canceled``
@@ -47,7 +48,13 @@ with open(ROOT / "calls.jsonl", "a") as f:
         "env": {k: os.environ.get(k) for k in ("ANSIBLE_COLLECTIONS_PATH",)},
     }) + "\n")
 
-conf = scenario.get("runner", {})
+def _limit(cmdline):
+    import shlex
+    words = shlex.split(cmdline)
+    return words[words.index("--limit") + 1] if "--limit" in words else ""
+
+
+conf = scenario.get("runner_by_limit", {}).get(_limit(args.cmdline), scenario.get("runner", {}))
 
 
 def record_signal(signum, _frame):
@@ -84,7 +91,7 @@ stdout = open(art / "stdout", "w")
 line = 0
 for counter, ev in enumerate(events, start=1):
     if conf.get("gate_after") == counter - 1:
-        while not (ROOT / "gate").exists():
+        while not (ROOT / conf.get("gate", "gate")).exists():
             time.sleep(0.02)
     text = ev.get("stdout", "")
     n = len(text.splitlines()) if text else 0

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useNavigate, useParams } from "react-router";
+import { Link, Navigate, useNavigate, useParams } from "react-router";
 
 import { CheckoutBadge, ModeBadge, SourceBadge, StatusBadge } from "@/components/RunBadges";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,20 @@ export function RunPage() {
   return (
     <div className="flex flex-col h-full">
       <RunHeader run={run} />
+      {run.status === "queued" && (
+        <div className="px-6 py-2 border-b border-border bg-muted text-sm text-zinc-700">
+          {run.waiting_for ? (
+            <>
+              Waiting for{" "}
+              <Link to={`/runs/${run.waiting_for.id}`} className="underline">
+                Run #{run.waiting_for.id} ({run.waiting_for.playbook})
+              </Link>
+            </>
+          ) : (
+            "Resolving the commit and hosts…"
+          )}
+        </div>
+      )}
       {run.failure_reason && (
         <div
           className={cn(
@@ -90,7 +104,16 @@ function RunHeader({ run }: { run: Run }) {
       )}
       <div className="ml-auto flex items-center gap-2">
         {actionError && <span className="text-xs text-destructive">{actionError}</span>}
-        {live ? (
+        {run.status === "queued" ? (
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => act(() => api.cancelRun(run.id))}
+            title="Take the Run out of the queue; it never touches a host"
+          >
+            Cancel
+          </Button>
+        ) : live ? (
           <>
             <Button
               variant="outline"

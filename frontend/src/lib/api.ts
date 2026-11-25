@@ -26,6 +26,8 @@ export interface Run {
   recap: Recap | null;
   recap_source: RecapSource | null;
   stop_requested: boolean;
+  /** While queued: the Run it waits for (holding, or queued ahead for, one of its hosts). */
+  waiting_for: { id: number; playbook: string } | null;
 }
 
 export type RecapSource = "ansible" | "locomotive";
@@ -156,6 +158,7 @@ export const api = {
   ) => request<Preview>("/api/preview", { method: "POST", body: JSON.stringify(options), signal }),
   grid: (id: number) => request<Grid>(`/api/runs/${id}/grid`),
   stopRun: (id: number) => request<Run>(`/api/runs/${id}/stop`, { method: "POST" }),
+  cancelRun: (id: number) => request<Run>(`/api/runs/${id}/cancel`, { method: "POST" }),
   killRun: (id: number) => request<Run>(`/api/runs/${id}/kill`, { method: "POST" }),
   runAgain: (id: number) => request<Run>(`/api/runs/${id}/again`, { method: "POST" }),
   logStreamUrl: (id: number) => `/api/runs/${id}/log/stream`,

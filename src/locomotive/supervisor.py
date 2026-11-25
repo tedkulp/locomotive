@@ -33,6 +33,8 @@ POLL_SECONDS = 0.1
 STOP_PLUGIN_DIR = Path(__file__).parent / "ansible_plugins"
 STOPPED = "Stopped after a task"
 KILLED = "Killed"
+CANCELED = "Canceled while queued"
+CANCEL_REASONS = {"stop": STOPPED, "kill": KILLED, "cancel": CANCELED}
 
 
 class RunFailed(Exception):
@@ -40,7 +42,15 @@ class RunFailed(Exception):
 
 
 class RunCanceled(Exception):
-    """Stop or Kill was requested before ansible-playbook started."""
+    """Stop, Kill or a queue cancel was requested before ansible-playbook started."""
+
+
+def resolves_hosts_at_start(run: Run) -> bool:
+    """A Working Copy can change while its Run waits, so its host set is resolved again as it starts.
+
+    A clean Run's host set (like its SHA) is fixed when it is queued, so what was previewed is what runs.
+    """
+    return run.checkout == "working_copy"
 
 
 class Supervisor:
@@ -60,7 +70,9 @@ class Supervisor:
         self._tasks: dict[int, asyncio.Task[None]] = {}
         self._logs: dict[int, RunLog] = {}
         self._procs: dict[int, asyncio.subprocess.Process] = {}
-        self._cancel: dict[int, str] = {}  # run id -> "stop" | "kill"
+        self._cancel: dict[int, str] = {}  # run id -> "stop" | "kill" | "cancel"
+        self._holding: set[int] = set()  # Runs that hold their hosts (status running)
+        self._queue_changed = asyncio.Event()
 
     # ------------------------------------------------------------------ layout
 
@@ -106,6 +118,17 @@ class Supervisor:
                 recap=grid.recap, recap_source=grid.recap_source,
             )
 
+    def resume_queued(self) -> None:
+        """Queued Runs haven't touched a host, so they survive a restart and carry on waiting.
+
+        A clean Run keeps the SHA and host set it was queued with; its export is redone from that SHA.
+        """
+        with self._sessions() as session:
+            ids = list(session.scalars(select(Run.id).where(Run.status == "queued").order_by(Run.id)))
+        for run_id in ids:
+            RunLog(self.log_path(run_id)).append("locomotive restarted; the Run is still queued", kind="locomotive")
+            self.start(run_id)
+
     def start(self, run_id: int) -> None:
         self._logs[run_id] = RunLog(self.log_path(run_id))
         task = asyncio.create_task(self._supervise(run_id), name=f"run-{run_id}")
@@ -144,6 +167,26 @@ class Supervisor:
             self._kill(run_id, proc)
         return True
 
+    def request_cancel(self, run_id: int) -> bool:
+        """Take a queued Run out of the queue. False if it isn't queued here (it may already hold its hosts)."""
+        if run_id not in self._tasks or run_id in self._holding:
+            return False
+        if self._cancel.get(run_id) in ("cancel", "kill"):
+            return True
+        self._cancel[run_id] = "cancel"
+        self._update(run_id, cancel_request="cancel")
+        self._logs[run_id].append("Cancel requested: the Run leaves the queue", kind="locomotive")
+        proc = self._procs.get(run_id)
+        if proc is not None and proc.returncode is None:
+            self._kill(run_id, proc)
+        self._wake_queue()
+        return True
+
+    def _wake_queue(self) -> None:
+        """Hosts were freed or a queued Run left: every waiting Run looks again."""
+        self._queue_changed.set()
+        self._queue_changed = asyncio.Event()
+
     def _kill(self, run_id: int, proc: asyncio.subprocess.Process) -> None:
         signal_group(proc.pid, signal.SIGINT)
         asyncio.create_task(self._escalate(run_id, proc), name=f"kill-{run_id}")
@@ -160,7 +203,7 @@ class Supervisor:
 
     def _register(self, run_id: int, proc: asyncio.subprocess.Process) -> None:
         self._procs[run_id] = proc
-        if self._cancel.get(run_id) == "kill":
+        if self._cancel.get(run_id) in ("kill", "cancel"):
             self._kill(run_id, proc)
 
     def _checkpoint(self, run_id: int) -> None:
@@ -191,6 +234,7 @@ class Supervisor:
         grid = RunGrid()
         work = self.runs_dir / str(run_id)
         status, reason, rc = "failed", None, None
+        queued_at_shutdown = False
         try:
             rc = await self._execute(run, work, log, grid)
             if rc == 0:
@@ -202,7 +246,10 @@ class Supervisor:
         except RunFailed as exc:
             reason = str(exc)
         except asyncio.CancelledError:
-            status, reason = "interrupted", "locomotive shut down during the Run"
+            if run_id in self._holding:
+                status, reason = "interrupted", "locomotive shut down during the Run"
+            else:
+                queued_at_shutdown = True
             raise
         except Exception as exc:  # noqa: BLE001 - a bug must still end the Run visibly
             reason = f"internal error: {exc!r}"
@@ -210,33 +257,49 @@ class Supervisor:
             cancel = self._cancel.pop(run_id, None)
             self._procs.pop(run_id, None)
             self._logs.pop(run_id, None)
-            # Asked to stop and Ansible never reached its final stats: the Run was cut short on request.
-            if cancel and status != "interrupted" and grid.stats is None:
-                status, reason = "canceled", KILLED if cancel == "kill" else STOPPED
+            self._holding.discard(run_id)
             shutil.rmtree(work, ignore_errors=True)
-            if status == "succeeded":
-                log.append("Run succeeded", kind="locomotive")
+            if queued_at_shutdown:
+                # It never touched a host: it stays queued and carries on after the restart.
+                log.append("locomotive shut down; the Run stays queued", kind="locomotive")
             else:
-                verb = {"canceled": "canceled", "interrupted": "interrupted"}.get(status, "failed")
-                log.append(f"Run {verb}: {reason}", kind="locomotive")
-            grid.finish()
-            grid.save(self.grid_path(run_id))
-            self._update(
-                run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now(),
-                recap=grid.recap, recap_source=grid.recap_source,
-            )
+                self._finish(run_id, log, grid, status, reason, rc, cancel)
+            self._wake_queue()
+
+    def _finish(
+        self, run_id: int, log: RunLog, grid: RunGrid, status: str, reason: str | None, rc: int | None,
+        cancel: str | None,
+    ) -> None:
+        # Asked to stop and Ansible never reached its final stats: the Run was cut short on request.
+        if cancel and status != "interrupted" and grid.stats is None:
+            status, reason = "canceled", CANCEL_REASONS[cancel]
+        if status == "succeeded":
+            log.append("Run succeeded", kind="locomotive")
+        else:
+            verb = {"canceled": "canceled", "interrupted": "interrupted"}.get(status, "failed")
+            log.append(f"Run {verb}: {reason}", kind="locomotive")
+        grid.finish()
+        grid.save(self.grid_path(run_id))
+        self._update(
+            run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now(),
+            recap=grid.recap, recap_source=grid.recap_source,
+        )
 
     async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
         project = work / "project"
 
         self._checkpoint(run.id)
-        log.append(f"Fetching {run.branch} from the remote", kind="locomotive")
-        try:
-            sha = await self._checkout.fetch(run.branch)
-        except CheckoutError as exc:
-            raise RunFailed(str(exc)) from exc
-        self._update(run.id, sha=sha)
-        log.append(f"{run.branch} is at {sha}", kind="locomotive")
+        if run.sha is None:
+            log.append(f"Fetching {run.branch} from the remote", kind="locomotive")
+            try:
+                sha = await self._checkout.fetch(run.branch)
+            except CheckoutError as exc:
+                raise RunFailed(str(exc)) from exc
+            self._update(run.id, sha=sha)
+            log.append(f"{run.branch} is at {sha}", kind="locomotive")
+        else:
+            sha = run.sha
+            log.append(f"Using {sha}, fixed when the Run was queued", kind="locomotive")
 
         try:
             await self._checkout.export(sha, project)
@@ -262,12 +325,70 @@ class Supervisor:
         self._checkpoint(run.id)
 
         options = launch_options(run)
-        hosts = await self._resolve_hosts(run, runtime, options, log)
-        self._update(run.id, hosts=hosts)
+        fresh = run.hosts is None
+        if fresh:
+            hosts = await self._resolve_hosts(run, runtime, options, log)
+            self._update(run.id, hosts=hosts)
+        else:
+            hosts = list(run.hosts or [])
+            log.append(f"Hosts ({len(hosts)}), fixed when the Run was queued: {', '.join(hosts)}", kind="locomotive")
         self._checkpoint(run.id)
+
+        await self._acquire(run, hosts, fresh, runtime, options, log)
 
         log.append(f"$ {options.command()}", kind="locomotive")
         return await self._run_ansible_runner(run, work, runtime, playbook, options.cmdline(), log, grid)
+
+    async def _acquire(
+        self, run: Run, hosts: list[str], fresh: bool, runtime: Runtime, options: LaunchOptions, log: RunLog
+    ) -> None:
+        """Wait until no running Run holds one of ``hosts`` and no earlier queued Run shares one, then
+        take them (status running). The check and the take happen with no await between them."""
+        waiting_for: int | None = None
+        while True:
+            changed = self._queue_changed
+            self._checkpoint(run.id)
+            blocker, held = self._blocker(run.id, hosts)
+            if blocker is None:
+                if resolves_hosts_at_start(run) and not fresh:
+                    hosts = await self._resolve_hosts(run, runtime, options, log)
+                    self._update(run.id, hosts=hosts)
+                    self._wake_queue()  # a smaller host set may unblock Runs queued behind this one
+                    fresh = True
+                    continue
+                self._holding.add(run.id)
+                self._update(run.id, status="running", started_at=self._clock.now(), waiting_for=None)
+                if waiting_for is not None:
+                    log.append("Hosts are free; starting", kind="locomotive")
+                return
+            fresh = False
+            if blocker.id != waiting_for:
+                waiting_for = blocker.id
+                self._update(run.id, waiting_for={"id": blocker.id, "playbook": blocker.playbook})
+                verb = "holds" if blocker.status == "running" else "is queued ahead for"
+                log.append(
+                    f"Waiting for Run #{blocker.id} ({blocker.playbook}): it {verb} {', '.join(held)}",
+                    kind="locomotive",
+                )
+            await changed.wait()
+
+    def _blocker(self, run_id: int, hosts: list[str]) -> tuple[Run | None, list[str]]:
+        """The Run that keeps this one waiting: a running Run sharing a host, else an earlier queued Run
+        (whose host set is known) sharing one. Earlier = launched first, so no Run waits forever."""
+        wanted = set(hosts)
+        with self._sessions() as session:
+            others = session.scalars(
+                select(Run)
+                .where(Run.status.in_(("running", "queued")), Run.id != run_id, Run.hosts.is_not(None))
+                .order_by(Run.id)
+            ).all()
+        running = [r for r in others if r.status == "running"]
+        ahead = [r for r in others if r.status == "queued" and r.id < run_id]
+        for other in (*running, *ahead):
+            shared = [h for h in (other.hosts or []) if h in wanted]
+            if shared:
+                return other, shared
+        return None, []
 
     async def _resolve_hosts(self, run: Run, runtime: Runtime, options: LaunchOptions, log: RunLog) -> list[str]:
         """The exact host set this Run will touch (``--list-hosts --limit`` semantics); fails loudly."""

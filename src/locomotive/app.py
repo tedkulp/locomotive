@@ -32,6 +32,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         supervisor = Supervisor(settings, clock, sessions, checkout, toolchain)
         supervisor.sweep_orphans()
         supervisor.interrupt_leftovers()
+        supervisor.resume_queued()
         previewer = Previewer(settings, checkout, toolchain)
         previewer.sweep()
         app.state.settings = settings
