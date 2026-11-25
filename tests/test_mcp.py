@@ -20,13 +20,7 @@ from conftest import (
     wait_for_run,
     wait_until,
 )
-from locomotive import api
 from locomotive.app import create_app
-
-
-def _has_route(path: str) -> bool:
-    """Whether this build's HTTP API has ``path`` (some read tools adapt endpoints other tickets add)."""
-    return any(getattr(route, "path", None) == path for route in api.router.routes)
 
 
 # One Ansible task that blocks until its gate opens.
@@ -318,9 +312,14 @@ def test_start_run_runs_a_branch_or_the_working_copy(start_app, working_copy, re
     assert "branch" in mcp.error("start_run", playbook="servers.yml", source="working_copy", branch="feature")
 
 
-@pytest.mark.skipif(not _has_route("/schedules"), reason="needs Schedules (#25)")
 def test_list_schedules(client, mcp) -> None:
-    assert mcp.ok("list_schedules") == client.get("/api/schedules").json()
+    body = {"name": "nightly drift", "playbook": "servers.yml", "cron": "0 3 * * *"}
+    client.post("/api/schedules", json=body).raise_for_status()
+
+    listed = mcp.ok("list_schedules")
+
+    assert listed == client.get("/api/schedules").json()
+    assert [s["name"] for s in listed["schedules"]] == ["nightly drift"]
 
 
 # ---------------------------------------------------------------------- the 10s budget

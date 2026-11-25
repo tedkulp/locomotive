@@ -8,7 +8,7 @@ Built on the official ``mcp`` SDK (``MCPServer``), served over streamable HTTP i
   labelled ``mcp:<name>`` in history.
 - **One source of truth**: every tool is a thin adapter over locomotive's own HTTP API, called
   in-process (no network, no guard), so validation, loud failure of unsupported options and response
-  shapes are exactly the UI's. An endpoint this build doesn't have yet answers "not available".
+  shapes are exactly the UI's.
 - **Budget**: every tool returns within ``mcp_tool_budget_seconds`` (under the 10s clients allow),
   except ``wait_for_run``, which returns within the ``max_seconds`` (at most 30) the caller asks for.
 - **Long Runs** are never awaited in one call: ``start_run`` returns the Run's id and status at once
@@ -28,7 +28,7 @@ from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal, ParamSpec, TypeVar
 
 import httpx
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -37,7 +37,6 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from locomotive import api
 from locomotive.api import RUN_SOURCE_KEY
 from locomotive.models import TERMINAL_STATUSES
 from locomotive.settings import Settings
@@ -123,13 +122,14 @@ class BearerGuard:
 class _Api:
     """locomotive's own HTTP API, called in-process; an error status becomes a ToolError."""
 
-    def __init__(self, app: FastAPI) -> None:
+    def __init__(self, app: FastAPI, routers: list[APIRouter]) -> None:
         self._app = FastAPI()
-        self._app.include_router(api.router, prefix="/api")
+        for router in routers:
+            self._app.include_router(router, prefix="/api")
         self._app.state = app.state  # the same services as the real app (set up by its lifespan)
 
     async def call(
-        self, method: str, path: str, *, source: str | None = None, missing: str | None = None, **kwargs: Any
+        self, method: str, path: str, *, source: str | None = None, **kwargs: Any
     ) -> Any:
         inner = self._app
 
@@ -141,8 +141,6 @@ class _Api:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://locomotive") as client:
             response = await client.request(method, path, **kwargs)
-        if response.status_code == 404 and missing and _detail(response) == "Not Found":
-            raise ToolError(f"This locomotive build doesn't offer {missing} yet")
         if response.status_code >= 400:
             raise ToolError(_detail(response))
         return None if response.status_code == 204 else response.json()
@@ -199,11 +197,12 @@ def _checkout(body: dict[str, Any], branch: str | None, source: Source) -> dict[
     return body
 
 
-def create_mcp(app: FastAPI, settings: Settings) -> tuple[MCPServer, ASGIApp]:
-    """The MCP server and the ASGI app to route ``/mcp`` to (bearer guard included)."""
+def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tuple[MCPServer, ASGIApp]:
+    """The MCP server and the ASGI app to route ``/mcp`` to (bearer guard included). ``routers`` are
+    the app's ``/api`` routers, which the tools call in-process."""
     tokens = parse_tokens(settings.mcp_tokens)
     budget = settings.mcp_tool_budget_seconds
-    http = _Api(app)
+    http = _Api(app, routers)
     server = MCPServer(name="locomotive", instructions=INSTRUCTIONS)
 
     def tool(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -239,17 +238,17 @@ def create_mcp(app: FastAPI, settings: Settings) -> tuple[MCPServer, ASGIApp]:
     @tool
     async def list_branches() -> dict[str, Any]:
         """The remote's branches (fetched now) and which one is the default."""
-        return await http.call("GET", "/api/branches", missing="branch listing")
+        return await http.call("GET", "/api/branches")
 
     @tool
     async def working_copy_status() -> dict[str, Any]:
         """The Working Copy's branch, HEAD, dirty and untracked files, and ahead/behind its upstream."""
-        return await http.call("GET", "/api/working-copy", missing="Working Copy status")
+        return await http.call("GET", "/api/working-copy")
 
     @tool
     async def list_schedules() -> dict[str, Any]:
-        """Schedules: cron, Run settings, enabled and notify toggles."""
-        return await http.call("GET", "/api/schedules", missing="Schedules")
+        """Schedules: cron, Run settings, enabled and notify-on-changes toggles, plus whether all are paused."""
+        return await http.call("GET", "/api/schedules")
 
     @tool
     async def get_inventory(

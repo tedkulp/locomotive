@@ -220,6 +220,7 @@ def run_json(run: Run) -> dict:
         "dirty": run.dirty,
         "untracked": run.untracked,
         "diff_truncated": run.diff_truncated,
+        "schedule": None if run.schedule_name is None else {"id": run.schedule_id, "name": run.schedule_name},
     }
 
 

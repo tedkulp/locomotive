@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.routing import Route
 
-from locomotive import api
+from locomotive import api, schedules
 from locomotive.checkout import Checkout
 from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
@@ -17,6 +17,7 @@ from locomotive.mcp_server import MCP_PATH, create_mcp
 from locomotive.settings import Settings
 from locomotive.preview import Previewer
 from locomotive.runtime import Toolchain
+from locomotive.scheduler import Scheduler
 from locomotive.supervisor import Supervisor
 from locomotive.working_copy import WorkingCopy
 
@@ -39,6 +40,8 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         supervisor.resume_queued()
         previewer = Previewer(settings, checkout, toolchain)
         previewer.sweep()
+        # After resume_queued: a firing must see the queued Runs that survived the restart.
+        scheduler = Scheduler(settings, clock, sessions, supervisor)
         app.state.settings = settings
         app.state.clock = clock
         app.state.sessions = sessions
@@ -47,10 +50,13 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         app.state.supervisor = supervisor
         app.state.toolchain = toolchain
         app.state.previewer = previewer
+        app.state.scheduler = scheduler
+        scheduler.start()
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
+            await scheduler.shutdown()
             await previewer.shutdown()
             await supervisor.shutdown()
             engine.dispose()
@@ -58,8 +64,10 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
     app = FastAPI(title="locomotive", lifespan=lifespan)
     parse_networks(settings.trusted_proxy_ips)  # a bad entry stops startup, not the first request
     app.add_middleware(AccessGuard, settings=settings)
-    app.include_router(api.router, prefix="/api")
-    mcp, mcp_app = create_mcp(app, settings)  # a bad token entry stops startup too
+    api_routers = [api.router, schedules.router]
+    for router in api_routers:
+        app.include_router(router, prefix="/api")
+    mcp, mcp_app = create_mcp(app, settings, api_routers)  # a bad token entry stops startup too
     app.router.routes.append(Route(MCP_PATH, endpoint=mcp_app))  # before the frontend's catch-all
     if settings.static_dir is not None:
         _mount_frontend(app, settings.static_dir)
