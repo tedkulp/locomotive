@@ -44,20 +44,24 @@ Each Run exports the resolved commit, runs `mise install` against that checkout'
 Per-host queue: two Runs never touch the same host at once (whatever started them, check mode included).
 A Run is `queued` from launch until it holds its hosts: it fetches and fixes its SHA (a failed fetch fails
 it at once), resolves its exact host set, then starts when no running Run holds one of its hosts and no
-earlier-launched queued Run shares one (so no Run is starved). Meanwhile its `stage` says `preparing` (fetching, installing, resolving hosts) or `waiting` (for hosts, with
-`waiting_for`); it is null once the Run leaves the queue; `POST
-/api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
-they were queued with. A Working Copy Run re-resolves its hosts as it starts (first preparing its toolchain again if its
-`mise.toml` or `collections/requirements.yml` changed while it was queued) and waits again on a new overlap.
+earlier-launched queued Run shares one (so no Run is starved). Meanwhile its `stage` is `preparing`
+(fetching, installing, resolving hosts) or `waiting` (for hosts, shown in `waiting_for`), and null once it
+leaves the queue; `POST /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with
+the SHA and host set they were queued with. A Working Copy Run re-resolves its hosts as it starts (first
+preparing its toolchain again if its `mise.toml` or `collections/requirements.yml` changed while it was
+queued) and waits again on a new overlap.
 
 Working Copy Runs (`checkout: "working_copy"`, needs `LOCOMOTIVE_WORKING_COPY_PATH`) run in place in that
 clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty flag, `git diff HEAD` (capped at
 1 MB, `GET /api/runs/<id>/working-copy-diff`) and the untracked files. locomotive only reads the Working Copy
 (without git's optional locks) and runs in it: it never commits, pulls, fetches or pushes it, so the
 ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
-clone at the same path inside the container, read-write. History (`GET /api/runs?limit=<n>&before=<id>`, newest first, `next_before` for the next page; the History page
-loads older pages on demand and shows each skipped, missed, interrupted, failed or canceled entry's reason). Clean Runs take a `branch` (default
+clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
 `LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
+
+History: `GET /api/runs?limit=<n>&before=<id>` pages newest first (`next_before` is the next page's cursor);
+the History page loads older pages on demand and shows the reason of each skipped, missed, interrupted,
+failed or canceled entry.
 
 Schedules (`/api/schedules`, the Schedules page): saved Run settings (Playbook, limit, tags, check/diff,
 verbosity, extra vars, branch; empty branch = the default branch) with a five-field cron expression read in
