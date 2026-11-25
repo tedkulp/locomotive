@@ -1,0 +1,32 @@
+[project]
+name = "locomotive"
+version = "0.1.0"
+description = "A small web app plus MCP server that runs Ansible Playbooks from one repo"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "pydantic-settings>=2.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+locomotive = "locomotive.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/locomotive"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
