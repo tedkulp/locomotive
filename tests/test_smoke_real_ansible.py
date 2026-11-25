@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import Remote, wait_for_run
+from conftest import Remote, wait_for_run, wait_until
 
 MISE = shutil.which("mise")
 pytestmark = pytest.mark.skipif(MISE is None, reason="seam 2 needs mise to install the pinned ansible-core")
@@ -87,6 +87,33 @@ TREE = {
       ansible.builtin.command: "true"
       changed_when: true
       tags: [change]
+""",
+    "playbooks/stop.yml": """\
+- name: Notify, then wait for the stop
+  hosts: local
+  tasks:
+    - name: Change and notify
+      ansible.builtin.command: "true"
+      changed_when: true
+      notify: Record the handler
+    - name: Wait for the stop
+      ansible.builtin.wait_for:
+        path: "{{ lookup('ansible.builtin.env', 'LOCOMOTIVE_STOP_FILE') }}"
+        timeout: 60
+    - name: After the stop
+      ansible.builtin.debug:
+        msg: ran-after-the-stop
+  handlers:
+    - name: Record the handler
+      ansible.builtin.debug:
+        msg: the handler ran
+
+- name: A later play
+  hosts: local
+  tasks:
+    - name: Later play task
+      ansible.builtin.debug:
+        msg: ran-in-the-later-play
 """,
     "roles/app/tasks/main.yml": """\
 - name: Install packages
@@ -300,3 +327,27 @@ def test_a_real_run_against_localhost(smoke):
     assert "TASK [Ping localhost]" not in log  # not tagged
     assert "changed=1" in log
     assert SECRET not in log
+
+
+def test_stop_after_this_task_still_runs_the_handlers_already_notified(smoke):
+    client, *_ = smoke
+    run_id = client.post("/api/runs", json={"playbook": "stop.yml", "check": False}).json()["id"]
+
+    def waiting():
+        rows = {t["name"]: t["results"] for t in client.get(f"/api/runs/{run_id}/grid").json()["tasks"]}
+        return rows.get("Wait for the stop", {}).get("localhost") == "running"
+
+    wait_until(waiting, timeout=120)
+    client.post(f"/api/runs/{run_id}/stop").raise_for_status()
+    run = wait_for_run(client, run_id, timeout=60)
+
+    assert run["status"] == "canceled", run["failure_reason"]
+    assert run["failure_reason"] == "Stopped after a task"
+    rows = {t["name"]: t["results"] for t in client.get(f"/api/runs/{run_id}/grid").json()["tasks"]}
+    assert rows["Wait for the stop"] == {"localhost": "ok"}
+    assert rows["Record the handler"] == {"localhost": "ok"}
+    assert not rows.get("After the stop")
+    assert not rows.get("Later play task")
+    log = "\n".join(line["text"] for line in client.get(f"/api/runs/{run_id}/log").json()["lines"])
+    assert "the handler ran" in log
+    assert "ran-after-the-stop" not in log and "ran-in-the-later-play" not in log

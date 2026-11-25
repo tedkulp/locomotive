@@ -30,6 +30,9 @@ class RunGrid:
         self.counts: dict[str, dict[str, int]] = {}
         self.stats: dict[str, dict[str, int]] | None = None
         self.version = 0
+        # Tasks locomotive's stop plugin skipped to reach the notified handlers (see
+        # ``ansible_plugins/locomotive_stop.py``): they never ran, so they get no cells.
+        self.stop_skipped: set[str] = set()
 
     # ------------------------------------------------------------------ folding events
 
@@ -82,6 +85,11 @@ class RunGrid:
 
     def _result(self, kind: str, data: dict[str, Any]) -> None:
         res = data.get("res") if isinstance(data.get("res"), dict) else {}
+        if kind == "runner_on_skipped" and data.get("task_uuid") in self.stop_skipped:
+            row, host = self._task(data), data.get("host")
+            if row is not None and host:
+                row["results"].pop(host, None)
+            return
         is_changed = bool(res.get("changed"))
         if kind == "runner_on_ok":
             status = "changed" if is_changed else "ok"

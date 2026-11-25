@@ -10,6 +10,7 @@ Like the real pair it stands in for:
 - when locomotive's ``locomotive_stop`` callback plugin is on ``ANSIBLE_CALLBACK_PLUGINS`` and the file
   named by ``LOCOMOTIVE_STOP_FILE`` exists as a task starts, Ansible ends with "User interrupted
   execution" (exit 99) before that task runs on any host. No stats are written in either case.
+  (The stub has no handlers to flush first; seam 2 covers that with the real plugin.)
 """
 import argparse
 import json
@@ -111,7 +112,7 @@ for counter, ev in enumerate(events, start=1):
     if text:
         stdout.write(text + "\n")
         stdout.flush()
-    if ev["event"] in ("playbook_on_task_start", "playbook_on_handler_task_start") and stop_requested():
+    if ev["event"] == "playbook_on_task_start" and stop_requested():  # handlers aren't stopped
         print("ERROR! User interrupted execution", file=sys.stderr)
         finish(99, "failed")
     time.sleep(conf.get("delay", 0))

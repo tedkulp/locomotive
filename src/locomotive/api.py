@@ -357,7 +357,8 @@ async def keep_run(run_id: int, body: KeepRequest, request: Request) -> dict:
 
 @router.post("/runs/{run_id}/stop")
 async def stop_run(run_id: int, request: Request) -> dict:
-    """Stop after this task: the running task finishes on every host, then the Run ends as canceled."""
+    """Stop after this task: the running task finishes on every host, handlers already notified run, then
+    the Run ends as canceled."""
     return _control(request, run_id, request.app.state.supervisor.request_stop)
 
 

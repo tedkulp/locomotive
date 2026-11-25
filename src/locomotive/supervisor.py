@@ -158,6 +158,10 @@ class Supervisor:
         """Read by the ``locomotive_stop`` callback plugin as each task starts."""
         return self.runs_dir / str(run_id) / "stop"
 
+    def stop_done_file(self, run_id: int) -> Path:
+        """Written by the plugin once the stop takes effect; lists the tasks it skipped to run handlers."""
+        return self.runs_dir / str(run_id) / "stop.done"
+
     def request_stop(self, run_id: int) -> bool:
         """Let the current task finish, then end the Run. False if the Run isn't running here."""
         if run_id not in self._tasks:
@@ -274,6 +278,7 @@ class Supervisor:
             reason = f"internal error: {exc!r}"
         finally:
             cancel = self._cancel.pop(run_id, None)
+            stopped = self.stop_done_file(run_id).exists()
             self._procs.pop(run_id, None)
             self._logs.pop(run_id, None)
             self._holding.discard(run_id)
@@ -282,7 +287,7 @@ class Supervisor:
                 # It never touched a host: it stays queued and carries on after the restart.
                 log.append("locomotive shut down; the Run stays queued", kind="locomotive")
             else:
-                fields = self._finish(run_id, log, grid, status, reason, rc, cancel)
+                fields = self._finish(run_id, log, grid, status, reason, rc, cancel, stopped)
                 if fields["status"] != "interrupted":  # shutting down: housekeeping compresses it at startup
                     fields["log_bytes"] = await self._compress(run_id)
                 self._update(run_id, **fields)
@@ -291,11 +296,12 @@ class Supervisor:
 
     def _finish(
         self, run_id: int, log: RunLog, grid: RunGrid, status: str, reason: str | None, rc: int | None,
-        cancel: str | None,
+        cancel: str | None, stopped: bool = False,
     ) -> dict[str, object]:
         """The Run's last log line and final grid; returns the fields that end it."""
-        # Asked to stop and Ansible never reached its final stats: the Run was cut short on request.
-        if cancel and status != "interrupted" and grid.stats is None:
+        # Asked to stop and Ansible never reached its final stats, or the stop plugin skipped work to end it
+        # (it leaves ``stop.done``): the Run was cut short on request.
+        if cancel and status != "interrupted" and (grid.stats is None or stopped):
             status, reason = "canceled", CANCEL_REASONS[cancel]
         if status == "succeeded":
             log.append("Run succeeded", kind="locomotive")
@@ -530,7 +536,9 @@ class Supervisor:
                 start_new_session=True,
             )
             self._register(run.id, proc)
-            follower = EventFollower(artifacts / ident / "job_events", log, grid, self.grid_path(run.id))
+            follower = EventFollower(
+                artifacts / ident / "job_events", log, grid, self.grid_path(run.id), self.stop_done_file(run.id)
+            )
             try:
                 while proc.returncode is None:
                     follower.poll()
@@ -549,8 +557,11 @@ class Supervisor:
 class EventFollower:
     """Follows the job_events files ansible-runner writes, in counter order, into the Run log and grid."""
 
-    def __init__(self, directory: Path, log: RunLog, grid: RunGrid, grid_path: Path) -> None:
+    def __init__(
+        self, directory: Path, log: RunLog, grid: RunGrid, grid_path: Path, stop_done: Path | None = None
+    ) -> None:
         self._dir = directory
+        self._stop_done = stop_done
         self._log = log
         self._grid = grid
         self._grid_path = grid_path
@@ -587,6 +598,9 @@ class EventFollower:
                 break
             self._seen.add(counter)
             self._next = counter + 1
+            if event.get("event") == "runner_on_skipped" and self._stop_done is not None:
+                with contextlib.suppress(OSError):  # written before the skip, so it's there by now
+                    self._grid.stop_skipped.update(self._stop_done.read_text().split())
             self._grid.apply(event)
             if event.get("stdout"):
                 host = (event.get("event_data") or {}).get("host")
