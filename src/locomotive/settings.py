@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Toolchain used for every Run (the checkout's own mise.toml decides versions).
     mise_bin: str = "mise"
 
+    # Previews must answer within the 10s MCP budget; the helper itself is killed after this long.
+    preview_timeout_seconds: float = 8.0
+
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 

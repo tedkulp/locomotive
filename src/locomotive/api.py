@@ -4,15 +4,15 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Literal
-
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from sqlalchemy import select
 
 from locomotive.checkout import PLAYBOOK_NAME, CheckoutError, UnknownBranch
+from locomotive.launch import LaunchOptions
 from locomotive.models import Run
+from locomotive.preview import PreviewError
 from locomotive.runlog import RunLog
 
 router = APIRouter()
@@ -40,16 +40,42 @@ async def list_playbooks(request: Request, branch: str | None = None) -> dict:
     }
 
 
+def _check_playbook(state, playbook: str) -> None:  # type: ignore[no-untyped-def]
+    if not PLAYBOOK_NAME.match(playbook):
+        raise HTTPException(status_code=422, detail=f"invalid Playbook name {playbook!r}")
+    if playbook in state.settings.hidden_playbooks:
+        raise HTTPException(status_code=422, detail=f"Playbook {playbook} is hidden on this Controller")
+
+
+# ---------------------------------------------------------------------- Previews
+
+
+class PreviewRequest(LaunchOptions):
+    """The launch options to preview, plus how to show includes and (optionally) which commit."""
+
+    expand_includes: bool = False
+    sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+
+
+@router.post("/preview")
+async def preview(body: PreviewRequest, request: Request) -> dict:
+    """Hosts the Run would touch (exact), tasks that may run, tags and the inventory graph (no vars)."""
+    state = request.app.state
+    _check_playbook(state, body.playbook)
+    options = LaunchOptions.model_validate(body.model_dump(exclude={"expand_includes", "sha"}))
+    try:
+        return await state.previewer.preview(
+            options, state.settings.default_branch, body.sha, body.expand_includes
+        )
+    except PreviewError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except UnknownBranch as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except CheckoutError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------- Runs
-
-
-class StartRun(BaseModel):
-    """Launch options. Anything locomotive can't honour yet is rejected (extra="forbid")."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    playbook: str = Field(min_length=1, max_length=255)
-    check: Literal[True] = True
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -69,6 +95,12 @@ def run_json(run: Run) -> dict:
         "branch": run.branch,
         "sha": run.sha,
         "check": run.check,
+        "diff": run.diff,
+        "verbosity": run.verbosity,
+        "limit": run.limit,
+        "hosts": run.hosts,
+        "tags": run.tags or [],
+        "extra_vars": run.extra_vars or {},
         "requirements_hash": run.requirements_hash,
         "ansible_core_version": run.ansible_core_version,
         "rc": run.rc,
@@ -81,12 +113,10 @@ def run_json(run: Run) -> dict:
 
 
 @router.post("/runs", status_code=201)
-async def start_run(body: StartRun, request: Request) -> dict:
+async def start_run(body: LaunchOptions, request: Request) -> dict:
+    """Start a Run. Options locomotive can't honour are rejected here (422), never silently ignored."""
     state = request.app.state
-    if not PLAYBOOK_NAME.match(body.playbook):
-        raise HTTPException(status_code=422, detail=f"invalid Playbook name {body.playbook!r}")
-    if body.playbook in state.settings.hidden_playbooks:
-        raise HTTPException(status_code=422, detail=f"Playbook {body.playbook} is hidden on this Controller")
+    _check_playbook(state, body.playbook)
     now = state.clock.now()
     with state.sessions() as session:
         run = Run(
@@ -96,6 +126,11 @@ async def start_run(body: StartRun, request: Request) -> dict:
             checkout="clean",
             branch=state.settings.default_branch,
             check=body.check,
+            diff=body.diff,
+            verbosity=body.verbosity,
+            limit=body.limit,
+            tags=body.tags,
+            extra_vars=body.extra_vars,
             created_at=now,
             started_at=now,
         )

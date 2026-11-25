@@ -133,8 +133,18 @@ def test_a_playbook_missing_at_the_resolved_sha_fails_the_run(client, remote):
 
 def test_options_locomotive_cannot_honour_are_rejected_at_launch(client, stubs):
     for body in (
-        {"playbook": "servers.yml", "limit": "alpha"},
-        {"playbook": "servers.yml", "check": False},
+        {"playbook": "servers.yml", "skip_tags": ["x"]},
+        {"playbook": "servers.yml", "start_at_task": "ping"},
+        {"playbook": "servers.yml", "forks": 50},
+        {"playbook": "servers.yml", "verbosity": 5},
+        {"playbook": "servers.yml", "limit": "@/etc/retry"},
+        {"playbook": "servers.yml", "limit": "alpha:!@hosts.txt"},
+        {"playbook": "servers.yml", "limit": "alpha\nbeta"},
+        {"playbook": "servers.yml", "tags": ["two words"]},
+        {"playbook": "servers.yml", "tags": ["a,b"]},
+        {"playbook": "servers.yml", "extra_vars": ["not", "a", "mapping"]},
+        {"playbook": "servers.yml", "extra_vars": "x=1"},
+        {"playbook": "servers.yml", "check": "maybe"},
         {"playbook": "../etc/passwd"},
         {},
     ):
