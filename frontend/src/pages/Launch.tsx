@@ -70,7 +70,10 @@ export function LaunchPage() {
   }, []);
 
   const wcAvailable = wc?.available === true;
-  const useWc = fromWorkingCopy && wcAvailable;
+  // The switch is never overridden: if the Working Copy goes away while it is on, the form says so and
+  // Start is blocked (never a silent fall back to a clean Run).
+  const useWc = fromWorkingCopy;
+  const wcLost = fromWorkingCopy && wc != null && !wcAvailable;
   const cleanBranch = branch ?? branches?.default ?? "main";
   const choice: CheckoutChoice = useMemo(
     () => (useWc ? { checkout: "working_copy" } : { checkout: "clean", branch: cleanBranch }),
@@ -171,7 +174,7 @@ export function LaunchPage() {
     setTags((t) => (on ? [...t, tag] : t.filter((x) => x !== tag)));
 
   const blocked =
-    !options || !current || current.hosts.hosts.length === 0 || current.hosts.unmatched.length > 0;
+    wcLost || !options || !current || current.hosts.hosts.length === 0 || current.hosts.unmatched.length > 0;
 
   const start = async () => {
     if (!options || blocked) return;
@@ -347,7 +350,7 @@ function CheckoutBanner({
         role="switch"
         aria-checked={on}
         aria-label="Run from the Working Copy"
-        disabled={!available}
+        disabled={!available && !on}
         onClick={() => setOn(!on)}
         title={available ? "Run from the Working Copy, in place, uncommitted edits included" : wc?.reason}
         className={cn(
@@ -400,6 +403,12 @@ function CheckoutBanner({
             "Fetching from the remote…"
           )}
         </div>
+        {on && wc && !wc.available && (
+          <div className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            The Working Copy is unavailable: {wc.reason}. Nothing can start from it until it is back; turn the
+            switch off to run a clean export instead.
+          </div>
+        )}
         {on && files.length > 0 && (
           <ul className="mt-2 max-h-40 overflow-auto font-mono text-xs text-amber-900 space-y-0.5">
             {files.map(({ f, untracked }) => (
