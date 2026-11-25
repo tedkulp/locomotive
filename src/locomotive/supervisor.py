@@ -405,6 +405,9 @@ class Supervisor:
                         "queued: preparing its toolchain again",
                         kind="locomotive",
                     )
+                    if waiting_for is not None:  # its stage is "preparing" again meanwhile
+                        waiting_for = None
+                        self._update(run.id, waiting_for=None)
                     runtime = await self._prepare(run, runtime.project, log)
                     prepared = toolchain_files(runtime.project)  # (a change during it is caught next time round)
                     fresh = recorded = False  # its hosts, resolved with the new runtime
