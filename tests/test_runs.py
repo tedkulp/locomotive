@@ -174,3 +174,22 @@ def test_a_checkout_without_ansible_runner_fails_the_run_with_a_clear_reason(cli
         "ansible-runner failed to start (exit code 1): "
         "mise ERROR \"ansible-runner\" couldn't exec process: No such file or directory"
     )
+
+
+def test_history_pages_back_through_every_run_with_a_cursor(client):
+    ids = [client.post("/api/runs", json={"playbook": "servers.yml"}).json()["id"] for _ in range(5)]
+    for run_id in ids:
+        wait_for_run(client, run_id)
+
+    seen, before, pages = [], None, 0
+    while True:
+        params = {"limit": 2} | ({"before": before} if before is not None else {})
+        page = client.get("/api/runs", params=params).json()
+        seen += [run["id"] for run in page["runs"]]
+        pages += 1
+        before = page["next_before"]
+        if before is None:
+            break
+
+    assert seen == list(reversed(ids))
+    assert pages == 3

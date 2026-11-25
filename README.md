@@ -54,7 +54,8 @@ clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty
 1 MB, `GET /api/runs/<id>/working-copy-diff`) and the untracked files. locomotive only reads the Working Copy
 (without git's optional locks) and runs in it: it never commits, pulls, fetches or pushes it, so the
 ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
-clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
+clone at the same path inside the container, read-write. History (`GET /api/runs?limit=<n>&before=<id>`, newest first, `next_before` for the next page; the History page
+loads older pages on demand and shows each skipped, missed, interrupted, failed or canceled entry's reason). Clean Runs take a `branch` (default
 `LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
 
 Schedules (`/api/schedules`, the Schedules page): saved Run settings (Playbook, limit, tags, check/diff,

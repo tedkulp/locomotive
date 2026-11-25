@@ -278,6 +278,11 @@ export const api = {
   workingCopy: () => request<WorkingCopyStatus>("/api/working-copy"),
   workingCopyDiff: (id: number) => request<WorkingCopyDiff>(`/api/runs/${id}/working-copy-diff`),
   runs: (limit = 50) => request<{ runs: Run[] }>(`/api/runs?limit=${limit}`).then((r) => r.runs),
+  /** One page of history, newest first, older than Run `before`; `next_before` is the next page's cursor. */
+  runsPage: (limit: number, before?: number | null) =>
+    request<{ runs: Run[]; next_before: number | null }>(
+      `/api/runs?limit=${limit}${before != null ? `&before=${before}` : ""}`,
+    ),
   run: (id: number) => request<Run>(`/api/runs/${id}`),
   startRun: (options: LaunchOptions & CheckoutChoice) =>
     request<Run>("/api/runs", { method: "POST", body: JSON.stringify(options) }),

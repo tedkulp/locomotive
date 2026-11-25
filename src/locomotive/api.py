@@ -314,11 +314,18 @@ def _launch(request: Request, body: LaunchOptions, branch: str, checkout: str = 
 
 
 @router.get("/runs")
-async def list_runs(request: Request, limit: int = 50) -> dict:
-    limit = max(1, min(limit, 500))
+async def list_runs(
+    request: Request, limit: int = Query(default=50, ge=1, le=500), before: int | None = Query(default=None, ge=1)
+) -> dict:
+    """History, newest first: up to ``limit`` Runs (and skipped/missed entries) older than Run ``before``.
+    ``next_before`` is the cursor for the next (older) page; null on the last one."""
+    query = select(Run).order_by(Run.id.desc()).limit(limit + 1)
+    if before is not None:
+        query = query.where(Run.id < before)
     with request.app.state.sessions() as session:
-        runs = session.scalars(select(Run).order_by(Run.id.desc()).limit(limit)).all()
-    return {"runs": [run_json(run) for run in runs]}
+        runs = session.scalars(query).all()
+    page = runs[:limit]
+    return {"runs": [run_json(run) for run in page], "next_before": page[-1].id if len(runs) > limit else None}
 
 
 def _get_run(request: Request, run_id: int) -> Run:
