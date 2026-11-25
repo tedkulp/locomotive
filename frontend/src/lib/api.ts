@@ -47,6 +47,15 @@ export interface Run {
   dirty: boolean | null;
   untracked: string[] | null;
   diff_truncated: boolean | null;
+  /** Keep exempts the Run's log from pruning. */
+  keep: boolean;
+  /** live / complete / truncated (stopped at the per-Run cap) / pruned (log, events and grid deleted). */
+  log_state: "live" | "complete" | "truncated" | "pruned";
+  log_truncated: boolean;
+  log_pruned: boolean;
+  log_pruned_at: string | null;
+  /** Disk used by the Run's log, events and grid once finished. */
+  log_bytes: number | null;
 }
 
 export type CheckoutKind = "clean" | "working_copy";
@@ -229,6 +238,33 @@ export interface SchedulerStatus {
   last_ping_error: string | null;
 }
 
+export interface HousekeepingPass {
+  id: number;
+  trigger: "startup" | "daily";
+  started_at: string;
+  finished_at: string | null;
+  pruned: { run_id: number; playbook: string; reason: "age" | "budget"; bytes: number }[];
+  compressed: number;
+  freed_bytes: number;
+  total_bytes: number;
+  kept_bytes: number;
+  budget_bytes: number;
+  /** Set when Kept logs alone exceed the budget (nothing is pruned for it). */
+  warning: string | null;
+  warning_sent: boolean;
+  error: string | null;
+}
+
+export interface HousekeepingStatus {
+  time_zone: string;
+  budget_bytes: number;
+  log_cap_bytes: number;
+  retention_days: { quiet_scheduled: number; other: number };
+  last_check_at: string | null;
+  next_pass_at: string | null;
+  passes: HousekeepingPass[];
+}
+
 export const api = {
   playbooks: (choice: CheckoutChoice) =>
     request<PlaybookList>(
@@ -252,6 +288,9 @@ export const api = {
   cancelRun: (id: number) => request<Run>(`/api/runs/${id}/cancel`, { method: "POST" }),
   killRun: (id: number) => request<Run>(`/api/runs/${id}/kill`, { method: "POST" }),
   runAgain: (id: number) => request<Run>(`/api/runs/${id}/again`, { method: "POST" }),
+  setKeep: (id: number, keep: boolean) =>
+    request<Run>(`/api/runs/${id}/keep`, { method: "PUT", body: JSON.stringify({ keep }) }),
+  housekeeping: () => request<HousekeepingStatus>("/api/housekeeping"),
   logStreamUrl: (id: number) => `/api/runs/${id}/log/stream`,
   schedules: () => request<SchedulerStatus & { schedules: Schedule[] }>("/api/schedules"),
   createSchedule: (settings: ScheduleSettings) =>

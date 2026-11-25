@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -18,6 +19,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from locomotive import history
 from locomotive.checkout import Checkout, CheckoutError
 from locomotive.clock import Clock
 from locomotive.launch import LaunchOptions
@@ -28,6 +30,8 @@ from locomotive.runlog import RunLog
 from locomotive.runtime import Runtime, Toolchain, ToolchainError, kill_group, last_line, signal_group
 from locomotive.settings import Settings
 from locomotive.working_copy import WorkingCopy, WorkingCopyUnavailable
+
+logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.1
 
@@ -142,7 +146,10 @@ class Supervisor:
             self.start(run_id)
 
     def start(self, run_id: int) -> None:
-        self._logs[run_id] = RunLog(self.log_path(run_id))
+        self._logs[run_id] = RunLog(
+            self.log_path(run_id), cap=self._settings.log_cap_bytes,
+            on_truncate=lambda: self._update(run_id, log_truncated=True),
+        )
         task = asyncio.create_task(self._supervise(run_id), name=f"run-{run_id}")
         self._tasks[run_id] = task
         task.add_done_callback(lambda _t: self._tasks.pop(run_id, None))
@@ -275,13 +282,18 @@ class Supervisor:
                 # It never touched a host: it stays queued and carries on after the restart.
                 log.append("locomotive shut down; the Run stays queued", kind="locomotive")
             else:
-                self._finish(run_id, log, grid, status, reason, rc, cancel)
+                fields = self._finish(run_id, log, grid, status, reason, rc, cancel)
+                if fields["status"] != "interrupted":  # shutting down: housekeeping compresses it at startup
+                    fields["log_bytes"] = await self._compress(run_id)
+                self._update(run_id, **fields)
+                self._ended(run_id)
             self._wake_queue()
 
     def _finish(
         self, run_id: int, log: RunLog, grid: RunGrid, status: str, reason: str | None, rc: int | None,
         cancel: str | None,
-    ) -> None:
+    ) -> dict[str, object]:
+        """The Run's last log line and final grid; returns the fields that end it."""
         # Asked to stop and Ansible never reached its final stats: the Run was cut short on request.
         if cancel and status != "interrupted" and grid.stats is None:
             status, reason = "canceled", CANCEL_REASONS[cancel]
@@ -292,11 +304,20 @@ class Supervisor:
             log.append(f"Run {verb}: {reason}", kind="locomotive")
         grid.finish()
         grid.save(self.grid_path(run_id))
-        self._update(
-            run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now(),
-            recap=grid.recap, recap_source=grid.recap_source, first_failed_task=grid.first_failed_task,
-        )
-        self._ended(run_id)
+        return {
+            "status": status, "failure_reason": reason, "rc": rc, "finished_at": self._clock.now(),
+            "recap": grid.recap, "recap_source": grid.recap_source, "first_failed_task": grid.first_failed_task,
+        }
+
+    async def _compress(self, run_id: int) -> int | None:
+        """Gzip the finished Run's files (off the event loop: a log can be 200 MB); its disk use after."""
+        directory = self.history_dir(run_id)
+        try:
+            await asyncio.to_thread(history.compress, directory)
+        except OSError:
+            logger.exception("compressing Run %d's log failed; housekeeping will retry", run_id)
+            return None
+        return history.disk_usage(directory)
 
     async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
         self._checkpoint(run.id)

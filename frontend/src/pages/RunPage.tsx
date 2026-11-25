@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useNow, usePolling } from "@/hooks/usePolling";
 import { useRunLog } from "@/hooks/useRunLog";
 import { api, isFinished, type CellStatus, type Grid, type LogLine, type Recap, type Run, type WorkingCopyDiff } from "@/lib/api";
-import { runDuration } from "@/lib/format";
+import { formatBytes, formatDate, runDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export function CurrentRunPage() {
@@ -21,7 +21,8 @@ export function RunPage() {
   const runId = Number(useParams().id);
   const { lines, grid, finalRun } = useRunLog(runId);
   const { data: polled, error } = usePolling(() => api.run(runId), 2000, [runId]);
-  const run = finalRun ?? polled;
+  // The poll keeps Keep and the log state fresh after the stream has ended.
+  const run = polled?.id === runId && isFinished(polled) ? polled : (finalRun ?? polled);
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const toggleHost = (host: string) => setHostFilter((current) => (current === host ? null : host));
   useEffect(() => setHostFilter(null), [runId]);
@@ -64,14 +65,29 @@ export function RunPage() {
           {run.notification.error ? ` (${run.notification.error})` : ""}.
         </div>
       )}
-      {grid && grid.tasks.length > 0 && (
+      {run.log_truncated && (
+        <div className="px-6 py-2 border-b border-amber-200 bg-amber-50 text-sm text-amber-800">
+          Log truncated: it reached the per-Run cap, so later output was not kept. The grid and recap are complete.
+        </div>
+      )}
+      {run.log_pruned && run.log_pruned_at && (
+        <div className="px-6 py-2 border-b border-border bg-muted text-sm text-zinc-700">
+          Log pruned on {formatDate(run.log_pruned_at)}. The summary and recap remain; the log, events and task grid
+          were deleted by housekeeping.
+        </div>
+      )}
+      {!run.log_pruned && grid && grid.tasks.length > 0 && (
         <TaskGrid grid={grid} live={live} hostFilter={hostFilter} onHost={toggleHost} />
       )}
       <div className="flex-1 grid grid-cols-[1fr_320px] min-h-0">
-        <LogView lines={lines} live={live} hostFilter={hostFilter} onClear={() => setHostFilter(null)} />
+        {run.log_pruned ? (
+          <div className="p-6 text-sm text-muted-foreground bg-card">No log: it was pruned.</div>
+        ) : (
+          <LogView lines={lines} live={live} hostFilter={hostFilter} onClear={() => setHostFilter(null)} />
+        )}
         <RecapPanel
-          hosts={grid?.hosts ?? []}
-          recap={grid?.recap ?? run.recap ?? {}}
+          hosts={run.log_pruned ? [] : (grid?.hosts ?? [])}
+          recap={run.log_pruned ? (run.recap ?? {}) : (grid?.recap ?? run.recap ?? {})}
           appBuilt={!live && (grid?.recap_source ?? run.recap_source) === "locomotive"}
           hostFilter={hostFilter}
           onHost={toggleHost}
@@ -86,6 +102,8 @@ function RunHeader({ run }: { run: Run }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [keep, setKeep] = useState(run.keep);
+  useEffect(() => setKeep(run.keep), [run.keep]);
   const act = (action: () => Promise<Run>, then?: (r: Run) => void) => {
     setBusy(true);
     setActionError(null);
@@ -109,8 +127,33 @@ function RunHeader({ run }: { run: Run }) {
       {run.ansible_core_version && (
         <span className="text-xs text-muted-foreground">ansible-core {run.ansible_core_version}</span>
       )}
+      {run.log_bytes != null && !run.log_pruned && (
+        <span className="text-xs text-muted-foreground">log {formatBytes(run.log_bytes)}</span>
+      )}
       <div className="ml-auto flex items-center gap-2">
         {actionError && <span className="text-xs text-destructive">{actionError}</span>}
+        <label
+          className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none"
+          title="Keep exempts this Run's log from pruning by age and by the log budget"
+        >
+          <input
+            type="checkbox"
+            checked={keep}
+            onChange={(e) => {
+              const next = e.currentTarget.checked;
+              setKeep(next);
+              setActionError(null);
+              api.setKeep(run.id, next).then(
+                (r) => setKeep(r.keep),
+                (err: Error) => {
+                  setKeep(!next);
+                  setActionError(err.message);
+                },
+              );
+            }}
+          />
+          Keep
+        </label>
         {run.status === "queued" ? (
           <Button
             variant="outline"

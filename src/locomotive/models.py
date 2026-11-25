@@ -58,6 +58,20 @@ class Run(Base):
     notification_status: Mapped[str | None] = mapped_column(String(16))
     notification_attempts: Mapped[int | None] = mapped_column(Integer)
     notification_error: Mapped[str | None] = mapped_column(Text)
+    # Log retention: Keep exempts the Run from pruning; the log stops at the per-Run cap (truncated); once
+    # pruned, the log, events and grid are gone and only this row remains.
+    keep: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_bytes: Mapped[int | None] = mapped_column(Integer)  # disk used by its log, events and grid
+    log_pruned_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    @property
+    def log_state(self) -> str:
+        if self.log_pruned_at is not None:
+            return "pruned"
+        if self.log_truncated:
+            return "truncated"
+        return "complete" if self.is_finished else "live"
 
     @property
     def is_finished(self) -> bool:
@@ -95,3 +109,24 @@ class ControllerSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[Any] = mapped_column(JSON)
+
+
+class HousekeepingPass(Base):
+    """One housekeeping pass (daily at 04:00 local, and at startup): what it pruned and what is left."""
+
+    __tablename__ = "housekeeping_passes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trigger: Mapped[str] = mapped_column(String(16))  # "startup" or "daily"
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # [{"run_id", "playbook", "reason": "age" | "budget", "bytes"}]
+    pruned: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    compressed: Mapped[int] = mapped_column(Integer, default=0)  # finished logs gzipped by this pass
+    freed_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    total_bytes: Mapped[int] = mapped_column(Integer, default=0)  # all Run logs after the pass
+    kept_bytes: Mapped[int] = mapped_column(Integer, default=0)  # of which Kept
+    budget_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    warning: Mapped[str | None] = mapped_column(Text)
+    warning_sent: Mapped[bool] = mapped_column(Boolean, default=False)  # the one-off ntfy warning went out
+    error: Mapped[str | None] = mapped_column(Text)

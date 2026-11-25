@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.routing import Route
 
-from locomotive import api, schedules
+from locomotive import api, housekeeping, schedules
 from locomotive.checkout import Checkout
 from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
@@ -44,6 +44,8 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         previewer.sweep()
         # After resume_queued: a firing must see the queued Runs that survived the restart.
         scheduler = Scheduler(settings, clock, sessions, supervisor, notifier)
+        # After interrupt_leftovers: its startup pass compresses the logs of Runs cut off by the restart.
+        housekeeper = housekeeping.Housekeeper(settings, clock, sessions, supervisor.history_dir, notifier)
         app.state.settings = settings
         app.state.clock = clock
         app.state.sessions = sessions
@@ -54,12 +56,15 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         app.state.previewer = previewer
         app.state.scheduler = scheduler
         app.state.notifier = notifier
+        app.state.housekeeper = housekeeper
         scheduler.start()
+        housekeeper.start()
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
             await scheduler.shutdown()
+            await housekeeper.shutdown()
             await previewer.shutdown()
             await supervisor.shutdown()
             await notifier.shutdown()  # after the supervisor: Runs it interrupted still notify
@@ -68,7 +73,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
     app = FastAPI(title="locomotive", lifespan=lifespan)
     parse_networks(settings.trusted_proxy_ips)  # a bad entry stops startup, not the first request
     app.add_middleware(AccessGuard, settings=settings)
-    api_routers = [api.router, schedules.router]
+    api_routers = [api.router, schedules.router, housekeeping.router]
     for router in api_routers:
         app.include_router(router, prefix="/api")
     mcp, mcp_app = create_mcp(app, settings, api_routers)  # a bad token entry stops startup too

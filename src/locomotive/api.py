@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from locomotive.checkout import BRANCH_NAME, PLAYBOOK_NAME, CheckoutError, UnknownBranch
@@ -229,6 +229,14 @@ def run_json(run: Run) -> dict:
             "attempts": run.notification_attempts,
             "error": run.notification_error,
         },
+        # Log retention: live / complete / truncated (stopped at the per-Run cap) / pruned (log, events and
+        # grid deleted by housekeeping on log_pruned_at; this record and its recap remain).
+        "keep": run.keep,
+        "log_state": run.log_state,
+        "log_truncated": run.log_truncated,
+        "log_pruned": run.log_pruned_at is not None,
+        "log_pruned_at": _iso(run.log_pruned_at),
+        "log_bytes": run.log_bytes,
     }
 
 
@@ -331,6 +339,22 @@ async def get_working_copy_diff(run_id: int, request: Request) -> dict:
     }
 
 
+class KeepRequest(BaseModel):
+    keep: bool
+
+
+@router.put("/runs/{run_id}/keep")
+async def keep_run(run_id: int, body: KeepRequest, request: Request) -> dict:
+    """Keep exempts the Run's log from pruning (by age and by the global budget)."""
+    with request.app.state.sessions() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        run.keep = body.keep
+        session.commit()
+    return run_json(run)
+
+
 @router.post("/runs/{run_id}/stop")
 async def stop_run(run_id: int, request: Request) -> dict:
     """Stop after this task: the running task finishes on every host, then the Run ends as canceled."""
@@ -359,10 +383,19 @@ def _control(request: Request, run_id: int, action: Callable[[int], bool]) -> di
     return run_json(_get_run(request, run_id))
 
 
+def _not_pruned(request: Request, run_id: int) -> Run:
+    """The Run, or 410 if housekeeping has pruned its log, events and grid (its record remains)."""
+    run = _get_run(request, run_id)
+    if run.log_pruned_at is not None:
+        day = run.log_pruned_at.astimezone(request.app.state.housekeeper.zone).date().isoformat()
+        raise HTTPException(status_code=410, detail=f"Run {run_id}'s log was pruned on {day}")
+    return run
+
+
 @router.get("/runs/{run_id}/grid")
 async def get_grid(run_id: int, request: Request) -> dict:
     """The task x host grid and per-host recap, as far as the Run has got."""
-    _get_run(request, run_id)
+    _not_pruned(request, run_id)
     grid = RunGrid.load(request.app.state.supervisor.grid_path(run_id))
     return public_json(grid.to_json())
 
@@ -370,7 +403,7 @@ async def get_grid(run_id: int, request: Request) -> dict:
 @router.get("/runs/{run_id}/log")
 async def get_log(run_id: int, request: Request, after: int = 0, host: str | None = None) -> dict:
     """The log after line ``after``; with ``host``, only that host's lines plus lines about no host."""
-    _get_run(request, run_id)
+    _not_pruned(request, run_id)
     path = request.app.state.supervisor.log_path(run_id)
     lines = RunLog.read(path, after)
     if host is not None:

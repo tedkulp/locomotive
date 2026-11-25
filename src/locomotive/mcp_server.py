@@ -355,7 +355,10 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
         ``finished`` that the Run is over (so once ``more`` is false, the log is complete)."""
         run = await http.call("GET", f"/api/runs/{run_id}")  # status first: a finished Run's log is whole
         if run.get("log_pruned"):  # set once housekeeping has pruned this Run's log
-            raise ToolError(f"log_pruned: Run {run_id}'s log has been pruned; its record and recap remain")
+            raise ToolError(
+                f"log_pruned: Run {run_id}'s log was pruned on {run.get('log_pruned_at')}; its record and "
+                "recap remain (get_run)"
+            )
         reply = await http.call("GET", f"/api/runs/{run_id}/log", params={"after": cursor})
         lines = reply["lines"]
         page: list[dict[str, Any]] = []

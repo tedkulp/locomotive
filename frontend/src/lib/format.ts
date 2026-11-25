@@ -36,3 +36,19 @@ export const statusTone = (status: string) =>
       missed: "red",
     }) as const
   )[status] ?? "zinc";
+
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = "B";
+  for (const u of units) {
+    size /= 1024;
+    unit = u;
+    if (size < 1024) break;
+  }
+  return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${unit}`;
+}
+
+export const formatDate = (iso: string) =>
+  new Date(iso).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });

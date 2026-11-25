@@ -5,8 +5,8 @@ import { createBrowserRouter, RouterProvider } from "react-router";
 import { Layout } from "@/components/Layout";
 import { HistoryPage } from "@/pages/History";
 import { LaunchPage } from "@/pages/Launch";
-import { PlaceholderPage } from "@/pages/Placeholder";
 import { SchedulesPage } from "@/pages/Schedules";
+import { StatusPage } from "@/pages/Status";
 import { CurrentRunPage, RunPage } from "@/pages/RunPage";
 import "./index.css";
 
@@ -19,7 +19,7 @@ const router = createBrowserRouter([
       { path: "/runs/:id", element: <RunPage /> },
       { path: "/history", element: <HistoryPage /> },
       { path: "/schedules", element: <SchedulesPage /> },
-      { path: "/status", element: <PlaceholderPage title="Status" /> },
+      { path: "/status", element: <StatusPage /> },
     ],
   },
 ]);

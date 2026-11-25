@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping; MCP server).
+Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping; MCP server; log retention and housekeeping).
 
 ## Layout
 
@@ -78,6 +78,18 @@ check mode, short SHA (or "working copy"), duration, failed/unreachable/changed 
 failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<id>` (default `https://LOCOMOTIVE_PUBLIC_HOSTNAME`). A failed
 delivery is retried 3 times (backoff `LOCOMOTIVE_NTFY_RETRY_SECONDS`, doubling), then recorded on the Run
 (`notification` in `GET /api/runs/<id>`, shown on the Run page); the Run's own outcome never changes.
+
+Log retention: every Run's history row is kept forever; its log, ansible-runner events and task grid
+(`<data dir>/history/<id>/`) are not. A Run's log stops at `LOCOMOTIVE_LOG_CAP_BYTES` (default 200 MB): the
+Run carries on with a complete grid and recap and is marked "log truncated". A finished Run's files are
+gzip-compressed. Housekeeping (not a Schedule) runs at startup and daily at 04:00 in `LOCOMOTIVE_TIME_ZONE`:
+it prunes the logs of quiet scheduled Runs (no changes, no failures) after 14 days and of all other Runs after
+90 days, then, while all Run logs exceed `LOCOMOTIVE_LOG_BUDGET_BYTES` (default 10 GB), the oldest un-Kept
+ones. A Run with Keep set (`PUT /api/runs/<id>/keep`, the Run page's Keep box) is never pruned; if Kept logs
+alone exceed the budget nothing is pruned for it and one ntfy warning (priority 3, "Kept logs exceed budget")
+goes out until the overflow clears. New Runs are never refused. A pruned Run keeps its summary and recap and
+shows "log pruned on <date>" (`log_pruned_at`; its `/log` and `/grid` answer 410, MCP `tail_run_output` a
+`log_pruned` error). Each pass and what it pruned is listed on the Status page (`GET /api/housekeeping`).
 
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names

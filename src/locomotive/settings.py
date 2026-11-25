@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # there. Unset: https://<public_hostname>; neither set: notifications carry no click-through.
     public_url: str | None = None
 
+    # Log retention. A Run's log stops at this size (the Run carries on); all Run logs together are kept
+    # under the budget by housekeeping, which runs daily at 04:00 (``time_zone``) and at startup, checking
+    # the clock this often.
+    log_cap_bytes: int = 200 * 1024 * 1024
+    log_budget_bytes: int = 10 * 1024 * 1024 * 1024
+    housekeeping_interval_seconds: float = 60.0
+
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 
