@@ -5,7 +5,9 @@
 - stub ``mise`` / ``ansible-runner`` / ``ansible-galaxy`` / ``ansible`` executables driven by a
   scripted scenario (``stubs``);
 - an injected clock (``clock``);
-- a fake HTTP server capturing outbound calls (``fake_http``).
+- a fake HTTP server capturing outbound calls (``fake_http``);
+- the access guard configured to trust the test peer (127.0.0.1) and allowlist ``IDENTITY``, which
+  ``client`` sends on every request (``anonymous`` builds a client without it).
 
 Tests talk to the app only through ``client`` (an httpx client against a real uvicorn server
 running the app in a background thread).
@@ -35,6 +37,9 @@ from locomotive.app import create_app
 from locomotive.settings import Settings
 
 STUBS_SRC = Path(__file__).parent / "stubs"
+
+IDENTITY_HEADER = "Tailscale-User-Login"
+IDENTITY = "ted@example.invalid"
 
 
 # --------------------------------------------------------------------------- clock
@@ -283,8 +288,14 @@ class AppServer:
             if not self.thread.is_alive() or time.monotonic() > deadline:
                 raise RuntimeError("locomotive did not start")
             time.sleep(0.01)
-        self.client = httpx.Client(base_url=f"http://127.0.0.1:{self.port}", timeout=10)
+        self.client = httpx.Client(
+            base_url=self.base_url, timeout=10, headers={IDENTITY_HEADER: IDENTITY}
+        )
         return self.client
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
 
     def __exit__(self, *exc: object) -> None:
         self.client.close()
@@ -309,6 +320,9 @@ def make_settings(
             "repo_url": remote.url,
             "hidden_playbooks": ["mac.yml", "locomotive.yml"],
             "mise_bin": str(stubs.mise),
+            "trusted_proxy_ips": ["127.0.0.1"],
+            "identity_header": IDENTITY_HEADER,
+            "allowlist": [IDENTITY],
         }
         values.update(overrides)
         return Settings(**values)
@@ -335,6 +349,21 @@ def start_app(
 @pytest.fixture
 def client(start_app: Callable[..., httpx.Client]) -> httpx.Client:
     return start_app()
+
+
+@pytest.fixture
+def anonymous() -> Iterator[Callable[..., httpx.Client]]:
+    """``anonymous(client, headers)``: a client to the same app carrying only ``headers``."""
+    made: list[httpx.Client] = []
+
+    def make(client: httpx.Client, headers: dict[str, str] | None = None) -> httpx.Client:
+        c = httpx.Client(base_url=client.base_url, timeout=10, headers=headers)
+        made.append(c)
+        return c
+
+    yield make
+    for c in made:
+        c.close()
 
 
 # --------------------------------------------------------------------------- helpers
