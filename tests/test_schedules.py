@@ -410,12 +410,14 @@ def test_a_failed_ping_is_retried_on_the_next_tick_and_never_stops_the_scheduler
     tick(app, clock)
     assert "503" in app.get("/api/scheduler").json()["last_ping_error"]
 
-    fake_http.status = 200
     clock.set(local(2026, 11, 25, 3, 0))
-    tick(app, clock)
-    assert len(entries(app)) == 1
+    tick(app, clock)  # the loop runs one tick at a time: from here on every tick reads 03:00
+    assert len(entries(app)) == 1  # the failing ping didn't stop the Schedule firing
+    assert "503" in app.get("/api/scheduler").json()["last_ping_error"]
+
+    fake_http.status = 200
+    wait_until(lambda: app.get("/api/scheduler").json()["last_ping_error"] is None)
     status = app.get("/api/scheduler").json()
-    assert status["last_ping_error"] is None
     assert status["last_ping_at"] == iso(local(2026, 11, 25, 3, 0))
 
 
