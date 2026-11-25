@@ -23,6 +23,10 @@ router = APIRouter()
 
 SSE_POLL_SECONDS = 0.2
 
+# Who launched a Run, as recorded in history. Set in the ASGI scope only by locomotive itself (the MCP
+# server puts ``mcp:<token name>`` here); a request from outside can't set it, so it is "ui".
+RUN_SOURCE_KEY = "locomotive.run_source"
+
 
 # ---------------------------------------------------------------------- Playbooks
 
@@ -149,7 +153,7 @@ def _launch(request: Request, body: LaunchOptions, branch: str) -> dict:
             playbook=body.playbook,
             # Queued until its SHA and host set are fixed and no other Run holds (or is ahead for) a host.
             status="queued",
-            source="ui",
+            source=request.scope.get(RUN_SOURCE_KEY, "ui"),
             checkout="clean",
             branch=branch,
             check=body.check,

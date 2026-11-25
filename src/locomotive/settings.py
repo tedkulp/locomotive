@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     identity_header: str | None = None
     allowlist: CommaList = []
 
+    # MCP at /mcp: static bearer tokens, stored as ``name=<sha256 hex of the token>`` entries. A Run a
+    # token starts is labelled ``mcp:<name>`` in history (e.g. ``lxc=…`` -> ``mcp:lxc``). None: no MCP.
+    mcp_tokens: CommaList = []
+    # The hostname clients reach locomotive by; MCP's DNS-rebinding
+    # protection accepts it in Host/Origin besides localhost.
+    public_hostname: str | None = None
+    # Every MCP tool answers within this (clients give up at 10s); wait_for_run within what it's asked.
+    mcp_tool_budget_seconds: float = 9.0
+
     # Outbound notifications and the Scheduler Ping.
     ntfy_url: str | None = None
     ntfy_topic: str | None = None
@@ -54,7 +63,7 @@ class Settings(BaseSettings):
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 
-    @field_validator("hidden_playbooks", "trusted_proxy_ips", "allowlist", mode="before")
+    @field_validator("hidden_playbooks", "trusted_proxy_ips", "allowlist", "mcp_tokens", mode="before")
     @classmethod
     def _split_commas(cls, value: object) -> object:
         if isinstance(value, str):
