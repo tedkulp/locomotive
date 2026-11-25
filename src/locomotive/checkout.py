@@ -48,14 +48,7 @@ class Checkout:
         if not BRANCH_NAME.match(branch):
             raise UnknownBranch(f"invalid branch name {branch!r}")
         async with self._lock:
-            if not (self._mirror / "HEAD").exists():
-                await self._git(
-                    "clone", "--mirror", "--quiet", self._settings.repo_url, str(self._mirror),
-                    cwd=self._settings.data_dir, what="Fetch",
-                )
-            else:
-                await self._git("remote", "set-url", "origin", self._settings.repo_url, what="Fetch")
-                await self._git("fetch", "--prune", "--quiet", "origin", what="Fetch")
+            await self._sync()
             out = await self._git(
                 "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}",
                 what=f"Resolve branch {branch}", allow_fail=True,
@@ -63,6 +56,24 @@ class Checkout:
         if out is None:
             raise UnknownBranch(f"branch {branch!r} does not exist on the remote")
         return out.strip()
+
+    async def list_branches(self) -> list[str]:
+        """The remote's branches, fetched now."""
+        async with self._lock:
+            await self._sync()
+            out = await self._git("for-each-ref", "--format=%(refname:strip=2)", "refs/heads/", what="List branches")
+        return sorted(name for name in (out or "").splitlines() if BRANCH_NAME.match(name))
+
+    async def _sync(self) -> None:
+        """Clone or fetch the mirror (caller holds the lock)."""
+        if not (self._mirror / "HEAD").exists():
+            await self._git(
+                "clone", "--mirror", "--quiet", self._settings.repo_url, str(self._mirror),
+                cwd=self._settings.data_dir, what="Fetch",
+            )
+        else:
+            await self._git("remote", "set-url", "origin", self._settings.repo_url, what="Fetch")
+            await self._git("fetch", "--prune", "--quiet", "origin", what="Fetch")
 
     async def has_commit(self, sha: str) -> bool:
         """Whether the mirror already has commit ``sha`` (no fetch)."""

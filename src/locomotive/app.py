@@ -16,6 +16,7 @@ from locomotive.settings import Settings
 from locomotive.preview import Previewer
 from locomotive.runtime import Toolchain
 from locomotive.supervisor import Supervisor
+from locomotive.working_copy import WorkingCopy
 
 
 def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
@@ -28,8 +29,9 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         migrate(engine)
         sessions = make_sessionmaker(engine)
         checkout = Checkout(settings)
+        working_copy = WorkingCopy(settings.working_copy_path, settings.hidden_playbooks)
         toolchain = Toolchain(settings)
-        supervisor = Supervisor(settings, clock, sessions, checkout, toolchain)
+        supervisor = Supervisor(settings, clock, sessions, checkout, toolchain, working_copy)
         supervisor.sweep_orphans()
         supervisor.interrupt_leftovers()
         previewer = Previewer(settings, checkout, toolchain)
@@ -38,6 +40,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         app.state.clock = clock
         app.state.sessions = sessions
         app.state.checkout = checkout
+        app.state.working_copy = working_copy
         app.state.supervisor = supervisor
         app.state.toolchain = toolchain
         app.state.previewer = previewer

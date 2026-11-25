@@ -39,6 +39,11 @@ class Run(Base):
     recap: Mapped[dict | None] = mapped_column(JSON)
     recap_source: Mapped[str | None] = mapped_column(String(16))  # "ansible" or "locomotive"
     cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop" or "kill"
+    # Working Copy Runs only (None for clean Runs), recorded as the Run starts.
+    dirty: Mapped[bool | None] = mapped_column(Boolean)
+    wc_diff: Mapped[str | None] = mapped_column(Text)  # `git diff HEAD`, capped at ~1 MB
+    diff_truncated: Mapped[bool | None] = mapped_column(Boolean)
+    untracked: Mapped[list[str] | None] = mapped_column(JSON)
 
     @property
     def is_finished(self) -> bool:

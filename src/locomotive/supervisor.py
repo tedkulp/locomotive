@@ -26,6 +26,7 @@ from locomotive.rungrid import RunGrid
 from locomotive.runlog import RunLog
 from locomotive.runtime import Runtime, Toolchain, ToolchainError, kill_group, last_line, signal_group
 from locomotive.settings import Settings
+from locomotive.working_copy import WorkingCopy, WorkingCopyUnavailable
 
 POLL_SECONDS = 0.1
 
@@ -51,8 +52,10 @@ class Supervisor:
         sessions: sessionmaker,
         checkout: Checkout,
         toolchain: Toolchain,
+        working_copy: WorkingCopy | None = None,
     ) -> None:
         self._settings = settings
+        self._working_copy = working_copy or WorkingCopy(settings.working_copy_path, settings.hidden_playbooks)
         self._clock = clock
         self._sessions = sessions
         self._checkout = checkout
@@ -227,24 +230,16 @@ class Supervisor:
             )
 
     async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
-        project = work / "project"
-
         self._checkpoint(run.id)
-        log.append(f"Fetching {run.branch} from the remote", kind="locomotive")
-        try:
-            sha = await self._checkout.fetch(run.branch)
-        except CheckoutError as exc:
-            raise RunFailed(str(exc)) from exc
-        self._update(run.id, sha=sha)
-        log.append(f"{run.branch} is at {sha}", kind="locomotive")
-
-        try:
-            await self._checkout.export(sha, project)
-        except CheckoutError as exc:
-            raise RunFailed(str(exc)) from exc
+        if run.checkout == "working_copy":
+            project = await self._resolve_working_copy(run, log)
+            work.mkdir(parents=True, exist_ok=True)  # ansible-runner's private data dir; the project is elsewhere
+        else:
+            project = await self._resolve_clean(run, work / "project", log)
         playbook = Path("playbooks") / run.playbook
         if not (project / playbook).is_file():
-            raise RunFailed(f"Playbook {playbook} does not exist at {sha[:12]}")
+            where = "in the Working Copy" if run.checkout == "working_copy" else f"at {(run.sha or '')[:12]}"
+            raise RunFailed(f"Playbook {playbook} does not exist {where}")
 
         self._checkpoint(run.id)
         try:
@@ -268,6 +263,49 @@ class Supervisor:
 
         log.append(f"$ {options.command()}", kind="locomotive")
         return await self._run_ansible_runner(run, work, runtime, playbook, options.cmdline(), log, grid)
+
+    async def _resolve_clean(self, run: Run, project: Path, log: RunLog) -> Path:
+        """Fetch the branch, record its SHA and export that tree into this Run's throwaway dir."""
+        log.append(f"Fetching {run.branch} from the remote", kind="locomotive")
+        try:
+            sha = await self._checkout.fetch(run.branch)
+        except CheckoutError as exc:
+            raise RunFailed(str(exc)) from exc
+        run.sha = sha
+        self._update(run.id, sha=sha)
+        log.append(f"{run.branch} is at {sha}", kind="locomotive")
+        try:
+            await self._checkout.export(sha, project)
+        except CheckoutError as exc:
+            raise RunFailed(str(exc)) from exc
+        return project
+
+    async def _resolve_working_copy(self, run: Run, log: RunLog) -> Path:
+        """Record HEAD, the dirty flag, the diff against HEAD and untracked files; run in place.
+
+        The Working Copy is only read here, never written: no commit, pull, push or fetch.
+        """
+        try:
+            snap = await self._working_copy.snapshot()
+        except WorkingCopyUnavailable as exc:
+            raise RunFailed(str(exc)) from exc
+        status = snap.status
+        run.sha = status.head_sha
+        self._update(
+            run.id, sha=status.head_sha, branch=status.branch or "HEAD", dirty=status.dirty,
+            wc_diff=snap.diff, diff_truncated=snap.diff_truncated, untracked=status.untracked,
+        )
+        state = (
+            f"dirty: {len(status.changed)} changed, {len(status.untracked)} untracked" if status.dirty else "clean"
+        )
+        log.append(
+            f"Running in place from the Working Copy {status.path} on {status.branch or 'a detached HEAD'} "
+            f"at {status.head_sha} ({state})",
+            kind="locomotive",
+        )
+        if snap.diff_truncated:
+            log.append("The recorded diff against HEAD is capped at 1 MB and was truncated", kind="locomotive")
+        return status.path
 
     async def _resolve_hosts(self, run: Run, runtime: Runtime, options: LaunchOptions, log: RunLog) -> list[str]:
         """The exact host set this Run will touch (``--list-hosts --limit`` semantics); fails loudly."""
