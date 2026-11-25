@@ -5,7 +5,7 @@ export interface Run {
   playbook: string;
   status: RunStatus;
   source: string;
-  checkout: "clean" | "working_copy";
+  checkout: CheckoutKind;
   branch: string;
   sha: string | null;
   check: boolean;
@@ -28,7 +28,39 @@ export interface Run {
   stop_requested: boolean;
   /** While queued: the Run it waits for (holding, or queued ahead for, one of its hosts). */
   waiting_for: { id: number; playbook: string } | null;
+  /** Working Copy Runs only (null for clean Runs). */
+  dirty: boolean | null;
+  untracked: string[] | null;
+  diff_truncated: boolean | null;
 }
+
+export type CheckoutKind = "clean" | "working_copy";
+
+export type WorkingCopyStatus =
+  | { available: false; path?: string; reason: string }
+  | {
+      available: true;
+      path: string;
+      branch: string | null;
+      head_sha: string;
+      dirty: boolean;
+      changed: string[];
+      untracked: string[];
+      upstream: string | null;
+      ahead: number | null;
+      behind: number | null;
+    };
+
+export interface WorkingCopyDiff {
+  sha: string | null;
+  dirty: boolean | null;
+  diff: string | null;
+  truncated: boolean | null;
+  untracked: string[] | null;
+}
+
+/** Which checkout a launch, listing or preview uses: a clean branch, or the Working Copy in place. */
+export type CheckoutChoice = { checkout: "clean"; branch: string } | { checkout: "working_copy" };
 
 export type RecapSource = "ansible" | "locomotive";
 
@@ -69,6 +101,7 @@ export interface Grid {
 }
 
 export interface PlaybookList {
+  checkout: CheckoutKind;
   branch: string;
   sha: string;
   playbooks: { name: string; path: string }[];
@@ -101,6 +134,7 @@ export interface PreviewTask {
 }
 
 export interface Preview {
+  checkout: CheckoutKind;
   branch: string;
   sha: string;
   command: string;
@@ -146,14 +180,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  playbooks: (branch?: string) =>
-    request<PlaybookList>(`/api/playbooks${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`),
+  playbooks: (choice: CheckoutChoice) =>
+    request<PlaybookList>(
+      choice.checkout === "working_copy"
+        ? "/api/playbooks?checkout=working_copy"
+        : `/api/playbooks?branch=${encodeURIComponent(choice.branch)}`,
+    ),
+  branches: () => request<{ default: string; branches: string[] }>("/api/branches"),
+  workingCopy: () => request<WorkingCopyStatus>("/api/working-copy"),
+  workingCopyDiff: (id: number) => request<WorkingCopyDiff>(`/api/runs/${id}/working-copy-diff`),
   runs: (limit = 50) => request<{ runs: Run[] }>(`/api/runs?limit=${limit}`).then((r) => r.runs),
   run: (id: number) => request<Run>(`/api/runs/${id}`),
-  startRun: (options: LaunchOptions) =>
+  startRun: (options: LaunchOptions & CheckoutChoice) =>
     request<Run>("/api/runs", { method: "POST", body: JSON.stringify(options) }),
   preview: (
-    options: LaunchOptions & { expand_includes: boolean; sha?: string },
+    options: LaunchOptions & CheckoutChoice & { expand_includes: boolean; sha?: string },
     signal?: AbortSignal,
   ) => request<Preview>("/api/preview", { method: "POST", body: JSON.stringify(options), signal }),
   grid: (id: number) => request<Grid>(`/api/runs/${id}/grid`),

@@ -4,11 +4,21 @@ import { useNavigate } from "react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { api, type LaunchOptions, type PlaybookList, type Preview, type PreviewTask } from "@/lib/api";
+import { usePolling } from "@/hooks/usePolling";
+import {
+  api,
+  type CheckoutChoice,
+  type LaunchOptions,
+  type PlaybookList,
+  type Preview,
+  type PreviewTask,
+  type WorkingCopyStatus,
+} from "@/lib/api";
 import { shortSha } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const PREVIEW_DEBOUNCE_MS = 300;
+const WORKING_COPY_POLL_MS = 5000;
 const HIDDEN_GROUPS = new Set(["all", "ungrouped"]);
 
 /** Extra vars as typed: a JSON object, or `key=value` pairs (one per line or space-separated). */
@@ -50,17 +60,44 @@ export function LaunchPage() {
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [fromWorkingCopy, setFromWorkingCopy] = useState(false);
+  const [branch, setBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<{ default: string; branches: string[] } | null>(null);
+  const { data: wc } = usePolling(api.workingCopy, WORKING_COPY_POLL_MS);
 
-  // Read from the checkout every time the page opens: Playbooks are never frozen.
   useEffect(() => {
-    api.playbooks().then(
-      (l) => {
-        setListing(l);
-        setPlaybook((current) => current ?? l.playbooks[0]?.name ?? null);
-      },
-      (e: Error) => setError(e.message),
-    );
+    api.branches().then(setBranches, (e: Error) => setError(e.message));
   }, []);
+
+  const wcAvailable = wc?.available === true;
+  const useWc = fromWorkingCopy && wcAvailable;
+  const cleanBranch = branch ?? branches?.default ?? "main";
+  const choice: CheckoutChoice = useMemo(
+    () => (useWc ? { checkout: "working_copy" } : { checkout: "clean", branch: cleanBranch }),
+    [useWc, cleanBranch],
+  );
+  // What the Working Copy looks like now: when it changes, Playbooks and previews are read again.
+  const wcStamp = wc?.available ? JSON.stringify([wc.head_sha, wc.branch, wc.changed, wc.untracked]) : "";
+  const choiceKey = JSON.stringify([choice, useWc ? wcStamp : null]);
+
+  // Read from the chosen checkout every time it changes: Playbooks are never frozen.
+  useEffect(() => {
+    let alive = true;
+    api.playbooks(choice).then(
+      (l) => {
+        if (!alive) return;
+        setListing(l);
+        setError(null);
+        setPlaybook((current) =>
+          current && l.playbooks.some((p) => p.name === current) ? current : (l.playbooks[0]?.name ?? null),
+        );
+      },
+      (e: Error) => alive && setError(e.message),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [choiceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const extra = useMemo(() => parseExtraVars(extraText), [extraText]);
   const options: LaunchOptions | null = useMemo(
@@ -70,7 +107,7 @@ export function LaunchPage() {
         : null,
     [playbook, limit, tags, check, diff, verbosity, extra],
   );
-  const optionsKey = options ? JSON.stringify([options, expandIncludes]) : null;
+  const optionsKey = options ? JSON.stringify([options, expandIncludes, choiceKey]) : null;
 
   // Preview hosts, tasks and the command for exactly these options (debounced, latest wins).
   useEffect(() => {
@@ -78,7 +115,19 @@ export function LaunchPage() {
     const controller = new AbortController();
     const timer = setTimeout(() => {
       api
-        .preview({ ...options, expand_includes: expandIncludes, sha: listing?.sha }, controller.signal)
+        .preview(
+          {
+            ...options,
+            ...choice,
+            expand_includes: expandIncludes,
+            // A clean listing's commit, so the preview doesn't fetch again; the Working Copy is read as is.
+            sha:
+              choice.checkout === "clean" && listing?.checkout === "clean" && listing.branch === choice.branch
+                ? listing.sha
+                : undefined,
+          },
+          controller.signal,
+        )
         .then(
           (p) => {
             setPreview(p);
@@ -129,7 +178,7 @@ export function LaunchPage() {
     setStarting(true);
     setError(null);
     try {
-      const run = await api.startRun(options);
+      const run = await api.startRun({ ...options, ...choice });
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -142,19 +191,15 @@ export function LaunchPage() {
       <div className="p-6 max-w-6xl w-full flex-1">
         <h1 className="text-xl font-semibold">Launch a Run</h1>
 
-        <div className="mt-4 rounded-lg border-2 border-border bg-card p-4">
-          <div className="font-semibold">Running a clean export of {listing?.branch ?? "main"}</div>
-          <div className="text-sm text-muted-foreground">
-            {listing ? (
-              <>
-                Fetched from the remote at <span className="font-mono">{shortSha(listing.sha)}</span>; the
-                Run fetches again before it starts.
-              </>
-            ) : (
-              "Fetching from the remote…"
-            )}
-          </div>
-        </div>
+        <CheckoutBanner
+          on={useWc}
+          setOn={setFromWorkingCopy}
+          wc={wc}
+          listing={listing}
+          branch={cleanBranch}
+          branches={branches?.branches ?? null}
+          setBranch={setBranch}
+        />
 
         {error && (
           <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -264,6 +309,142 @@ export function LaunchPage() {
         </Button>
       </div>
     </div>
+  );
+}
+
+/** The full-width "run from Working Copy" switch: amber with the uncommitted files when on, the branch
+ *  dropdown for a clean export when off; the Working Copy's branch and ahead/behind either way. */
+function CheckoutBanner({
+  on,
+  setOn,
+  wc,
+  listing,
+  branch,
+  branches,
+  setBranch,
+}: {
+  on: boolean;
+  setOn: (v: boolean) => void;
+  wc: WorkingCopyStatus | null;
+  listing: PlaybookList | null;
+  branch: string;
+  branches: string[] | null;
+  setBranch: (v: string) => void;
+}) {
+  const available = wc?.available === true;
+  const files = wc?.available
+    ? [...wc.changed.map((f) => ({ f, untracked: false })), ...wc.untracked.map((f) => ({ f, untracked: true }))]
+    : [];
+  return (
+    <div
+      className={cn(
+        "mt-4 rounded-lg border-2 p-4 flex items-start gap-4 transition-colors",
+        on ? "border-amber-400 bg-amber-50" : "border-border bg-card",
+      )}
+    >
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label="Run from the Working Copy"
+        disabled={!available}
+        onClick={() => setOn(!on)}
+        title={available ? "Run from the Working Copy, in place, uncommitted edits included" : wc?.reason}
+        className={cn(
+          "mt-0.5 relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+          on ? "bg-amber-500" : "bg-zinc-300",
+        )}
+      >
+        <span
+          className={cn(
+            "absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform",
+            on && "translate-x-5",
+          )}
+        />
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <div className="font-semibold">
+            {on ? "Running from the Working Copy" : <>Running a clean export of </>}
+          </div>
+          {!on && (
+            <select
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+              aria-label="Branch"
+              className="rounded-md border border-border bg-card px-1.5 py-0.5 font-mono text-sm"
+            >
+              {(branches ?? [branch]).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          )}
+          <WorkingCopyState wc={wc} />
+        </div>
+        <div className="mt-1 text-sm text-muted-foreground">
+          {on && wc?.available ? (
+            <>
+              In place at <span className="font-mono">{wc.path}</span>, HEAD{" "}
+              <span className="font-mono">{shortSha(wc.head_sha)}</span>.{" "}
+              {wc.dirty ? "Uncommitted state this Run will use:" : "No uncommitted changes."} locomotive never
+              commits, pulls or pushes it.
+            </>
+          ) : listing?.checkout === "clean" ? (
+            <>
+              Fetched from the remote at <span className="font-mono">{shortSha(listing.sha)}</span>; the Run fetches
+              again before it starts.
+            </>
+          ) : (
+            "Fetching from the remote…"
+          )}
+        </div>
+        {on && files.length > 0 && (
+          <ul className="mt-2 max-h-40 overflow-auto font-mono text-xs text-amber-900 space-y-0.5">
+            {files.map(({ f, untracked }) => (
+              <li key={f}>
+                <span className="inline-block w-5 text-amber-600">{untracked ? "??" : "M"}</span>
+                {f}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The Working Copy's branch, dirty state and ahead/behind its upstream (as Ted last fetched it). */
+function WorkingCopyState({ wc }: { wc: WorkingCopyStatus | null }) {
+  if (!wc) return null;
+  if (!wc.available)
+    return <span className="text-xs text-muted-foreground">Working Copy unavailable: {wc.reason}</span>;
+  const files = wc.changed.length + wc.untracked.length;
+  return (
+    <span className="flex flex-wrap items-center gap-1 text-xs">
+      <span className="text-muted-foreground">Working Copy</span>
+      <Badge>
+        <span className="font-mono">{wc.branch ?? "detached HEAD"}</span>
+      </Badge>
+      {wc.dirty ? (
+        <Badge tone="amber">
+          {files} uncommitted file{files === 1 ? "" : "s"}
+        </Badge>
+      ) : (
+        <Badge tone="green">clean</Badge>
+      )}
+      {wc.upstream ? (
+        <Badge
+          tone={wc.ahead || wc.behind ? "amber" : "zinc"}
+          title={`Against ${wc.upstream} as last fetched in the Working Copy`}
+        >
+          ↑{wc.ahead ?? 0} ↓{wc.behind ?? 0} {wc.upstream}
+        </Badge>
+      ) : (
+        <Badge>no upstream</Badge>
+      )}
+    </span>
   );
 }
 

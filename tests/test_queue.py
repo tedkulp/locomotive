@@ -1,7 +1,5 @@
 """Per-host queue: two Runs never touch the same host at once, whatever started them, check mode included."""
 
-import pytest
-
 from conftest import preview_for, wait_for_run, wait_until
 
 # One Ansible task that blocks until its named gate opens: the Run holds its hosts until then.
@@ -279,13 +277,15 @@ def test_queued_runs_keep_their_order_across_a_restart(start_app, stop_app, stub
     assert runner_limits(stubs) == ["alpha", "alpha,beta", "beta"]
 
 
-@pytest.mark.skip(reason="needs Working Copy Runs (tedkulp/ansible#22); adapt the launch body when it lands")
-def test_a_working_copy_run_re_resolves_its_hosts_at_start_and_waits_again_on_a_new_overlap(client, stubs):
+def test_a_working_copy_run_re_resolves_its_hosts_at_start_and_waits_again_on_a_new_overlap(
+    start_app, working_copy, stubs
+):
+    client = start_app(working_copy_path=working_copy.path)
     hosts_scenario(stubs, alpha="a", beta="b")
     holder = launch(client, "alpha")
     wait_status(client, holder, "running")
     stubs.script(previews={**stubs.scenario["previews"], "servers": preview_for(["alpha"])})
-    working = launch(client, "servers", checkout="working_copy")  # hypothetical #22 launch option
+    working = launch(client, "servers", checkout="working_copy")
     run = wait_waiting(client, working)
     assert run["hosts"] == ["alpha"]
     other = launch(client, "beta")

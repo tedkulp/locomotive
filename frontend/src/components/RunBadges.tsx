@@ -16,7 +16,16 @@ export function SourceBadge({ run }: { run: Run }) {
 }
 
 export function CheckoutBadge({ run }: { run: Run }) {
-  if (run.checkout === "working_copy") return <Badge tone="amber">working copy</Badge>;
+  if (run.checkout === "working_copy")
+    return (
+      <Badge tone="amber" title={`Working Copy Run on ${run.branch}${run.dirty ? " with uncommitted changes" : ""}`}>
+        WC{" "}
+        <span className="font-mono">
+          {shortSha(run.sha)}
+          {run.dirty ? "+dirty" : ""}
+        </span>
+      </Badge>
+    );
   return (
     <Badge>
       {run.branch} <span className="font-mono">{shortSha(run.sha)}</span>
