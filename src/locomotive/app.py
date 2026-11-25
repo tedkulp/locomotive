@@ -11,6 +11,7 @@ from locomotive import api
 from locomotive.checkout import Checkout
 from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
+from locomotive.guard import AccessGuard, parse_networks
 from locomotive.settings import Settings
 from locomotive.preview import Previewer
 from locomotive.runtime import Toolchain
@@ -47,6 +48,8 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
             engine.dispose()
 
     app = FastAPI(title="locomotive", lifespan=lifespan)
+    parse_networks(settings.trusted_proxy_ips)  # a bad entry stops startup, not the first request
+    app.add_middleware(AccessGuard, settings=settings)
     app.include_router(api.router, prefix="/api")
     if settings.static_dir is not None:
         _mount_frontend(app, settings.static_dir)

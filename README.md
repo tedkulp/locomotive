@@ -29,6 +29,14 @@ LOCOMOTIVE_STATIC_DIR=frontend/dist uv run python -m locomotive
 cd frontend && pnpm dev      # optional: Vite dev server proxying /api to :8000
 ```
 
+Access guard: locomotive has no login page. It accepts connections only from
+`LOCOMOTIVE_TRUSTED_PROXY_IPS` (the reverse proxy; addresses or CIDRs) and takes the user from
+`LOCOMOTIVE_IDENTITY_HEADER`, which must be on `LOCOMOTIVE_ALLOWLIST`. Missing identity is a plain
+401, an unlisted one 403; any other peer gets 403. `/mcp` ignores identity headers. Unset values fail
+closed, so for local use set e.g. `LOCOMOTIVE_TRUSTED_PROXY_IPS=127.0.0.1
+LOCOMOTIVE_IDENTITY_HEADER=X-User LOCOMOTIVE_ALLOWLIST=me` and have your browser (e.g. a header
+extension) send `X-User: me`.
+
 Each Run exports the resolved commit, runs `mise install` against that checkout's `mise.toml`, installs
 `collections/requirements.yml` into a cache keyed by its sha256, resolves its exact host set, then runs
 `ansible-runner` (which must be provided by the checkout's mise toolchain) with the launch options.
