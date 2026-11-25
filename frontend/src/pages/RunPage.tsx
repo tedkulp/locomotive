@@ -5,7 +5,7 @@ import { CheckoutBadge, ModeBadge, SourceBadge, StatusBadge } from "@/components
 import { Button } from "@/components/ui/button";
 import { useNow, usePolling } from "@/hooks/usePolling";
 import { useRunLog } from "@/hooks/useRunLog";
-import { api, isFinished, type CellStatus, type Grid, type LogLine, type Recap, type Run } from "@/lib/api";
+import { api, isFinished, type CellStatus, type Grid, type LogLine, type Recap, type Run, type WorkingCopyDiff } from "@/lib/api";
 import { runDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -47,6 +47,7 @@ export function RunPage() {
           )}
         </div>
       )}
+      {run.checkout === "working_copy" && run.sha && <WorkingCopyChanges run={run} />}
       {run.failure_reason && (
         <div
           className={cn(
@@ -160,6 +161,55 @@ const CELL: Record<CellStatus, string> = {
   running: "bg-sky-300 animate-pulse",
   interrupted: "bg-zinc-500",
 };
+
+/** What a Working Copy Run had uncommitted when it started: untracked files and the diff against HEAD. */
+function WorkingCopyChanges({ run }: { run: Run }) {
+  const [open, setOpen] = useState(false);
+  const [diff, setDiff] = useState<WorkingCopyDiff | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open && !diff) api.workingCopyDiff(run.id).then(setDiff, (e: Error) => setError(e.message));
+  }, [open, diff, run.id]);
+  const untracked = run.untracked ?? [];
+  return (
+    <details
+      className="px-6 py-2 border-b border-amber-200 bg-amber-50 text-sm"
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="cursor-pointer text-amber-900">
+        Working Copy on <span className="font-mono">{run.branch}</span> at{" "}
+        <span className="font-mono">{run.sha?.slice(0, 7)}</span>
+        {run.dirty
+          ? ` with uncommitted changes${untracked.length ? ` (${untracked.length} untracked file${untracked.length === 1 ? "" : "s"})` : ""}`
+          : ", no uncommitted changes"}
+        {run.diff_truncated && " · diff truncated at 1 MB"}
+      </summary>
+      {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+      {untracked.length > 0 && (
+        <div className="mt-2 font-mono text-xs text-amber-900">
+          {untracked.map((f) => (
+            <div key={f}>?? {f}</div>
+          ))}
+        </div>
+      )}
+      {diff?.diff && (
+        <pre className="mt-2 max-h-96 overflow-auto rounded-md border border-amber-200 bg-white p-2 font-mono text-xs">
+          {diff.diff.split("\n").map((line, i) => (
+            <div
+              key={i}
+              className={cn(
+                line.startsWith("+") && !line.startsWith("+++") && "text-emerald-700",
+                line.startsWith("-") && !line.startsWith("---") && "text-red-700",
+              )}
+            >
+              {line || "\u00a0"}
+            </div>
+          ))}
+        </pre>
+      )}
+    </details>
+  );
+}
 
 function TaskGrid({
   grid,

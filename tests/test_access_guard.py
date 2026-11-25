@@ -1,7 +1,7 @@
 """The access guard: only the trusted proxy may connect, and only allowlisted identities get in."""
 
 import pytest
-from conftest import IDENTITY, IDENTITY_HEADER
+from conftest import IDENTITY, IDENTITY_HEADER, LXC_TOKEN, McpCaller
 
 from locomotive.app import create_app
 
@@ -45,13 +45,25 @@ def test_with_no_trusted_proxies_configured_every_peer_is_rejected(start_app):
 
 
 def test_mcp_is_not_guarded_by_identity_headers(client, anonymous):
-    # No MCP server is mounted yet: reaching the router (404) shows the identity check was skipped.
-    assert anonymous(client).get("/mcp").status_code == 404
-    assert anonymous(client).post("/mcp/").status_code == 404
-    stranger = anonymous(client, {IDENTITY_HEADER: "mallory@example.invalid"})
-    assert stranger.get("/mcp").status_code == 404
+    tools = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    # /mcp answers with its own bearer-token 401, whatever identity is (or isn't) sent...
+    for headers in (None, {IDENTITY_HEADER: IDENTITY}, {IDENTITY_HEADER: "mallory@example.invalid"}):
+        resp = anonymous(client, headers).post("/mcp", json=tools)
+        assert resp.status_code == 401
+        assert resp.headers["www-authenticate"].startswith("Bearer")
+    # ...and a valid token gets in with no identity at all, or a stranger's.
+    stranger = {IDENTITY_HEADER: "mallory@example.invalid"}
+    assert McpCaller(str(client.base_url), LXC_TOKEN).tool_names()
+    assert McpCaller(str(client.base_url), LXC_TOKEN, headers=stranger).tool_names()
     # Only the exact /mcp prefix is exempt.
     assert anonymous(client).get("/mcpx").status_code == 401
+    assert "www-authenticate" not in anonymous(client).get("/mcpx").headers
+
+
+def test_mcp_with_a_valid_token_still_needs_a_trusted_peer(start_app, anonymous):
+    client = start_app(trusted_proxy_ips=["192.0.2.10"])
+    resp = anonymous(client, {"Authorization": f"Bearer {LXC_TOKEN}"}).post("/mcp", json={})
+    assert resp.status_code == 403
 
 
 def test_an_allowlisted_identity_reaches_the_ui_api_and_sse_streams(start_app, anonymous, tmp_path):

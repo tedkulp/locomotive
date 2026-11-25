@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of the default branch, check or real, with their log; per-host queue).
+Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; MCP server).
 
 ## Layout
 
@@ -48,6 +48,14 @@ earlier-launched queued Run shares one (so no Run is starved). Meanwhile it show
 /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
 they were queued with. A Working Copy Run re-resolves its hosts as it starts and waits again on a new overlap.
 
+Working Copy Runs (`checkout: "working_copy"`, needs `LOCOMOTIVE_WORKING_COPY_PATH`) run in place in that
+clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty flag, `git diff HEAD` (capped at
+1 MB, `GET /api/runs/<id>/working-copy-diff`) and the untracked files. locomotive only reads the Working Copy
+(without git's optional locks) and runs in it: it never commits, pulls, fetches or pushes it, so the
+ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
+clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
+`LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
+
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names
 only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventory` is never used.
@@ -55,6 +63,24 @@ only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventor
 `uv run pytest` includes seam 2 (`tests/test_smoke_real_ansible.py`): the real helper and one real
 `ansible-runner` Run against `localhost`, with the ansible-core pinned there. It needs `mise` on PATH
 (skipped otherwise) and installs that runtime on first use.
+
+MCP: `/mcp` is an MCP server (official `mcp` SDK, streamable HTTP) for Claude Code and other clients
+that can send a header. Each client gets a static bearer token; locomotive stores only its sha256, as
+`LOCOMOTIVE_MCP_TOKENS=lxc=<sha256>,mac=<sha256>` (make one with `openssl rand -hex 32`, hash it with
+`printf %s "$TOKEN" | sha256sum`). A missing or unknown token is a 401 (no OAuth), and a Run a token
+starts shows `mcp:<name>` as its source. `LOCOMOTIVE_PUBLIC_HOSTNAME` is the hostname clients use: MCP's
+DNS-rebinding check accepts it (and localhost) in `Host`/`Origin` and answers 421 to anything else.
+Tools: `list_playbooks`, `list_branches`, `working_copy_status`, `list_schedules`, `get_inventory`,
+`list_tags`, `preview_hosts`, `preview_tasks`, `list_runs`, `get_run`, `start_run` (check by default; a
+real Run needs `confirm: true`; `source: clean | working_copy`, `branch`; returns the queued or running
+Run at once), `tail_run_output(run_id, cursor)` and `wait_for_run(run_id, max_seconds <= 30)`. Each
+tool adapts the HTTP API in-process, so it validates and fails exactly as the UI does, and answers
+within `LOCOMOTIVE_MCP_TOOL_BUDGET_SECONDS` (default 9) except `wait_for_run`, which takes what it is asked for
+(default 8s).
+
+```sh
+claude mcp add --transport http locomotive https://<public hostname>/mcp --header "Authorization: Bearer $TOKEN"
+```
 
 ## Docker
 

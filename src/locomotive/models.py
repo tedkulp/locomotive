@@ -41,6 +41,11 @@ class Run(Base):
     cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop", "kill" or "cancel"
     # While queued: the Run it waits for, {"id", "playbook"} (the first one holding or ahead of its hosts).
     waiting_for: Mapped[dict | None] = mapped_column(JSON)
+    # Working Copy Runs only (None for clean Runs), recorded as the Run starts.
+    dirty: Mapped[bool | None] = mapped_column(Boolean)
+    wc_diff: Mapped[str | None] = mapped_column(Text)  # `git diff HEAD`, capped at ~1 MB
+    diff_truncated: Mapped[bool | None] = mapped_column(Boolean)
+    untracked: Mapped[list[str] | None] = mapped_column(JSON)
 
     @property
     def is_finished(self) -> bool:

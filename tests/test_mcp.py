@@ -21,6 +21,7 @@ from conftest import (
     wait_until,
 )
 from locomotive import api
+from locomotive.app import create_app
 
 
 def _has_route(path: str) -> bool:
@@ -55,6 +56,18 @@ def test_requests_without_a_valid_bearer_token_get_401(client: httpx.Client, ano
 def test_a_valid_token_reaches_the_tools(mcp: McpCaller) -> None:
     names = mcp.tool_names()
     assert {"list_playbooks", "start_run", "get_run", "tail_run_output", "wait_for_run"} <= names
+
+
+@pytest.mark.parametrize("entry", ["lxc", "lxc=not-a-hash", f"Bad Name={'a' * 64}", f"={'a' * 64}"])
+def test_a_malformed_token_entry_stops_startup(make_settings, entry) -> None:
+    with pytest.raises(ValueError, match="LOCOMOTIVE_MCP_TOKENS"):
+        create_app(make_settings(mcp_tokens=[entry]))
+
+
+def test_without_configured_tokens_no_one_gets_in(start_app, anonymous) -> None:
+    client = start_app(mcp_tokens=[])
+    response = anonymous(client, {"Authorization": "Bearer anything"}).post("/mcp", json={})
+    assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------- transport security
@@ -269,14 +282,40 @@ def test_previews_fail_loudly_like_the_ui(mcp) -> None:
     assert "does not exist" in mcp.error("preview_tasks", playbook="nope.yml")
 
 
-@pytest.mark.skipif(not _has_route("/branches"), reason="needs branch listing (#22)")
-def test_list_branches(client, mcp) -> None:
-    assert mcp.ok("list_branches") == client.get("/api/branches").json()
+def test_branches_and_working_copy_status(start_app, working_copy, remote) -> None:
+    remote.commit({"README.md": "feature\n"}, branch="feature")
+    working_copy.write({"roles/new/tasks/main.yml": "- debug: msg=new\n"})
+    client = start_app(working_copy_path=working_copy.path)
+    mcp = McpCaller(str(client.base_url), LXC_TOKEN)
+
+    branches = mcp.ok("list_branches")
+    assert branches == client.get("/api/branches").json()
+    assert {"main", "feature"} <= set(branches["branches"])
+
+    status = mcp.ok("working_copy_status")
+    assert status == client.get("/api/working-copy").json()
+    assert (status["available"], status["untracked"]) == (True, ["roles/new/tasks/main.yml"])
+
+    listed = mcp.ok("list_playbooks", source="working_copy")
+    assert listed == client.get("/api/playbooks?checkout=working_copy").json()
+    assert listed["checkout"] == "working_copy"
 
 
-@pytest.mark.skipif(not _has_route("/working-copy"), reason="needs Working Copy status (#22)")
-def test_working_copy_status(client, mcp) -> None:
-    assert mcp.ok("working_copy_status") == client.get("/api/working-copy").json()
+def test_start_run_runs_a_branch_or_the_working_copy(start_app, working_copy, remote) -> None:
+    feature = remote.commit({"README.md": "feature\n"}, branch="feature")
+    working_copy.write({"README.md": "uncommitted\n"})
+    client = start_app(working_copy_path=working_copy.path)
+    mcp = McpCaller(str(client.base_url), LXC_TOKEN)
+
+    clean = wait_for_run(client, mcp.ok("start_run", playbook="servers.yml", branch="feature")["id"])
+    wc = wait_for_run(client, mcp.ok("start_run", playbook="servers.yml", source="working_copy")["id"])
+    default = wait_for_run(client, mcp.ok("start_run", playbook="servers.yml")["id"])
+
+    assert (clean["checkout"], clean["branch"], clean["sha"]) == ("clean", "feature", feature)
+    assert (wc["checkout"], wc["dirty"], wc["source"]) == ("working_copy", True, "mcp:lxc")
+    assert (default["checkout"], default["branch"]) == ("clean", "main")
+    # A Working Copy Run runs whatever branch the Working Copy is on: no branch choice.
+    assert "branch" in mcp.error("start_run", playbook="servers.yml", source="working_copy", branch="feature")
 
 
 @pytest.mark.skipif(not _has_route("/schedules"), reason="needs Schedules (#25)")
