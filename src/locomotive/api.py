@@ -116,6 +116,7 @@ def run_json(run: Run) -> dict:
         "recap_source": run.recap_source,
         "stop_requested": run.cancel_request == "stop" and not run.is_finished,
         "waiting_for": run.waiting_for if run.status == "queued" else None,
+        "schedule": None if run.schedule_name is None else {"id": run.schedule_id, "name": run.schedule_name},
     }
 
 

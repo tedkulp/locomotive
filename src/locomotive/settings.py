@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     ntfy_token: SecretStr | None = None
     healthchecks_url: str | None = None
 
+    # Schedules: cron times are read in this IANA time zone (unset: TZ, then /etc/localtime, then UTC).
+    time_zone: str | None = None
+    # The scheduler loop looks for due firings this often; the Scheduler Ping goes out every 5 minutes.
+    scheduler_interval_seconds: float = 30.0
+
     # Toolchain used for every Run (the checkout's own mise.toml decides versions).
     mise_bin: str = "mise"
 

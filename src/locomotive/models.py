@@ -8,7 +8,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from locomotive.db import Base, UTCDateTime
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled", "interrupted"})
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled", "interrupted", "skipped", "missed"})
+# History entries a Schedule leaves instead of a Run (never touched a host): the reason is in failure_reason.
+NON_RUN_STATUSES = frozenset({"skipped", "missed"})
 
 
 class Run(Base):
@@ -41,7 +43,43 @@ class Run(Base):
     cancel_request: Mapped[str | None] = mapped_column(String(16))  # "stop", "kill" or "cancel"
     # While queued: the Run it waits for, {"id", "playbook"} (the first one holding or ahead of its hosts).
     waiting_for: Mapped[dict | None] = mapped_column(JSON)
+    # Set on scheduled Runs and skipped/missed entries; the name is kept if the Schedule is deleted.
+    schedule_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    schedule_name: Mapped[str | None] = mapped_column(String(255))
 
     @property
     def is_finished(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+
+class Schedule(Base):
+    """Saved Run settings with a cron expression; each firing produces one clean Run."""
+
+    __tablename__ = "schedules"
+    __table_args__ = {"sqlite_autoincrement": True}  # ids are never reused: Runs keep pointing at theirs
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    playbook: Mapped[str] = mapped_column(String(255))
+    branch: Mapped[str | None] = mapped_column(String(255))  # None = the default branch at firing time
+    check: Mapped[bool] = mapped_column(Boolean)
+    diff: Mapped[bool] = mapped_column(Boolean, default=False)
+    verbosity: Mapped[int] = mapped_column(Integer, default=0)
+    limit: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    extra_vars: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cron: Mapped[str] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_on_changes: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Every firing up to this instant has been dealt with (fired, skipped, missed or dropped).
+    last_fired_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class ControllerSetting(Base):
+    """Global settings changed from the UI (e.g. ``schedules_paused``), as JSON values by key."""
+
+    __tablename__ = "controller_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSON)
