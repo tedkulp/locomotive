@@ -36,7 +36,7 @@ export function RunPage() {
       <RunHeader run={run} />
       {run.status === "queued" && (
         <div className="px-6 py-2 border-b border-border bg-muted text-sm text-zinc-700">
-          {run.waiting_for ? (
+          {run.stage === "waiting" && run.waiting_for ? (
             <>
               Waiting for{" "}
               <Link to={`/runs/${run.waiting_for.id}`} className="underline">
@@ -44,7 +44,7 @@ export function RunPage() {
               </Link>
             </>
           ) : (
-            "Resolving the commit and hosts…"
+            "Preparing: fixing the commit, installing its toolchain and resolving its hosts…"
           )}
         </div>
       )}

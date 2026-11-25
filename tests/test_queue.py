@@ -301,3 +301,23 @@ def test_a_working_copy_run_re_resolves_its_hosts_at_start_and_waits_again_on_a_
     assert run["waiting_for"] == {"id": other, "playbook": "servers.yml"}
     stubs.release_gate("b")
     assert wait_for_run(client, working)["status"] == "succeeded"
+
+
+def test_a_queued_run_says_whether_it_is_preparing_or_waiting_for_hosts(client, stubs, mcp):
+    hosts_scenario(stubs, alpha="a")
+    stubs.script(mise_install_gate=True)
+
+    started = mcp.ok("start_run", playbook="servers.yml", limit="alpha")  # held in mise install
+
+    assert (started["status"], started["stage"]) == ("queued", "preparing")
+    assert get(client, started["id"])["stage"] == "preparing"
+    stubs.release_gate()
+    first = wait_status(client, started["id"], "running")
+    assert first["stage"] is None
+
+    second = wait_waiting(client, launch(client, "alpha,beta"))
+    assert (second["status"], second["stage"]) == ("queued", "waiting")
+
+    stubs.release_gate("a")
+    done = wait_for_run(client, second["id"])
+    assert done["stage"] is None

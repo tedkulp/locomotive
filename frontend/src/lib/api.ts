@@ -37,6 +37,8 @@ export interface Run {
   stop_requested: boolean;
   /** While queued: the Run it waits for (holding, or queued ahead for, one of its hosts). */
   waiting_for: { id: number; playbook: string } | null;
+  /** While queued: preparing (fetching, installing its toolchain, resolving hosts) or waiting (for hosts). */
+  stage: "preparing" | "waiting" | null;
   /** The Schedule that fired this Run (or left this skipped/missed entry). */
   schedule: { id: number | null; name: string } | null;
   /** The first task that failed on some host, set when the Run ends. */

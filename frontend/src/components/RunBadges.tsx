@@ -5,7 +5,12 @@ import type { Run } from "@/lib/api";
 import { shortSha, statusTone } from "@/lib/format";
 
 export function StatusBadge({ run }: { run: Run }) {
-  return <Badge tone={statusTone(run.status)}>{run.status}</Badge>;
+  return (
+    <Badge tone={statusTone(run.status)}>
+      {run.status}
+      {run.stage ? ` · ${run.stage}` : ""}
+    </Badge>
+  );
 }
 
 export function ModeBadge({ run }: { run: Run }) {

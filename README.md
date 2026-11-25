@@ -44,7 +44,8 @@ Each Run exports the resolved commit, runs `mise install` against that checkout'
 Per-host queue: two Runs never touch the same host at once (whatever started them, check mode included).
 A Run is `queued` from launch until it holds its hosts: it fetches and fixes its SHA (a failed fetch fails
 it at once), resolves its exact host set, then starts when no running Run holds one of its hosts and no
-earlier-launched queued Run shares one (so no Run is starved). Meanwhile it shows `waiting_for`; `POST
+earlier-launched queued Run shares one (so no Run is starved). Meanwhile its `stage` says `preparing` (fetching, installing, resolving hosts) or `waiting` (for hosts, with
+`waiting_for`); it is null once the Run leaves the queue; `POST
 /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
 they were queued with. A Working Copy Run re-resolves its hosts as it starts and waits again on a new overlap.
 

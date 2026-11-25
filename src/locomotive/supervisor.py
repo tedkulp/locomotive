@@ -253,6 +253,8 @@ class Supervisor:
     async def _supervise(self, run_id: int) -> None:
         with self._sessions() as session:
             run = session.get_one(Run, run_id)
+        if run.waiting_for is not None:  # resumed after a restart: it prepares again before it waits
+            self._update(run_id, waiting_for=None)
         log = self._logs[run_id]
         grid = RunGrid()
         work = self.runs_dir / str(run_id)

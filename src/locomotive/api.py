@@ -187,6 +187,14 @@ def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat().replace("+00:00", "Z")
 
 
+def queue_stage(run: Run) -> str | None:
+    """Where a queued Run is: ``preparing`` (fetching, installing its toolchain, resolving its hosts) or
+    ``waiting`` (ready, for a Run that holds or is queued ahead for one of its hosts). None unless queued."""
+    if run.status != "queued":
+        return None
+    return "waiting" if run.waiting_for else "preparing"
+
+
 def run_json(run: Run) -> dict:
     duration = None
     if run.started_at and run.finished_at:
@@ -218,6 +226,7 @@ def run_json(run: Run) -> dict:
         "recap_source": run.recap_source,
         "stop_requested": run.cancel_request == "stop" and not run.is_finished,
         "waiting_for": run.waiting_for if run.status == "queued" else None,
+        "stage": queue_stage(run),
         "dirty": run.dirty,
         "untracked": run.untracked,
         "diff_truncated": run.diff_truncated,
