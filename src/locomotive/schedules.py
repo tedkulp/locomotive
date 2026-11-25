@@ -9,10 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import select
 
 from locomotive import cron
-from locomotive.api import _check_playbook, _iso
 from locomotive.checkout import BRANCH_NAME
 from locomotive.launch import LaunchOptions
 from locomotive.models import Run, Schedule
+from locomotive.web import check_playbook, iso
 
 router = APIRouter()
 
@@ -78,9 +78,9 @@ def schedule_json(request: Request, schedule: Schedule, last_run: Run | None = N
         **{name: getattr(schedule, name) for name in FIELDS},
         "tags": schedule.tags or [],
         "extra_vars": schedule.extra_vars or {},
-        "last_fired_at": _iso(schedule.last_fired_at),
-        "next_fire_at": _iso(scheduler.next_firing(schedule)) if schedule.enabled else None,
-        "created_at": _iso(schedule.created_at),
+        "last_fired_at": iso(schedule.last_fired_at),
+        "next_fire_at": iso(scheduler.next_firing(schedule)) if schedule.enabled else None,
+        "created_at": iso(schedule.created_at),
         "last_run": None if last_run is None else {"id": last_run.id, "status": last_run.status},
     }
 
@@ -110,7 +110,7 @@ async def list_schedules(request: Request) -> dict:
 @router.post("/schedules", status_code=201)
 async def create_schedule(body: ScheduleSettings, request: Request) -> dict:
     state = request.app.state
-    _check_playbook(state, body.playbook)
+    check_playbook(state.settings, body.playbook)
     now = state.clock.now()
     with state.sessions() as session:
         schedule = Schedule(**body.model_dump(), last_fired_at=now, created_at=now)
@@ -144,7 +144,7 @@ async def update_schedule(schedule_id: int, body: ScheduleUpdate, request: Reque
         settings = ScheduleSettings.model_validate(merged)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_context=False)) from exc
-    _check_playbook(state, settings.playbook)
+    check_playbook(state.settings, settings.playbook)
     with state.sessions() as session:
         schedule = session.get_one(Schedule, schedule_id)
         restart = (settings.enabled and not schedule.enabled) or settings.cron != schedule.cron

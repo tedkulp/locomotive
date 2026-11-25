@@ -31,10 +31,17 @@ from sqlalchemy.orm import sessionmaker
 
 from locomotive import cron, history
 from locomotive.clock import Clock
-from locomotive.models import ControllerSetting, HousekeepingPass, Run
+from locomotive.models import (
+    ControllerSetting,
+    HousekeepingPass,
+    Run,
+    RunSource,
+    RunStatus,
+)
 from locomotive.notifier import DEFAULT, Message, Notifier
 from locomotive.runlog import size_text
 from locomotive.settings import Settings
+from locomotive.web import iso
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +55,7 @@ WARNING_TITLE = "Kept logs exceed budget"
 
 def is_quiet(run: Run) -> bool:
     """A scheduled Run that changed nothing and failed nowhere (or a firing skipped for that reason)."""
-    if run.source != "schedule" or run.status not in ("succeeded", "skipped"):
+    if run.source != RunSource.SCHEDULE or run.status not in (RunStatus.SUCCEEDED, RunStatus.SKIPPED):
         return False
     return not any(
         counts.get("changed") or counts.get("failed") or counts.get("unreachable")
@@ -234,16 +241,12 @@ class Housekeeper:
 router = APIRouter()
 
 
-def _iso(value: datetime | None) -> str | None:
-    return None if value is None else value.isoformat().replace("+00:00", "Z")
-
-
 def pass_json(record: HousekeepingPass) -> dict:
     return {
         "id": record.id,
         "trigger": record.trigger,
-        "started_at": _iso(record.started_at),
-        "finished_at": _iso(record.finished_at),
+        "started_at": iso(record.started_at),
+        "finished_at": iso(record.finished_at),
         "pruned": record.pruned or [],
         "compressed": record.compressed,
         "freed_bytes": record.freed_bytes,
@@ -271,8 +274,8 @@ async def housekeeping_status(request: Request) -> dict:
         "budget_bytes": settings.log_budget_bytes,
         "log_cap_bytes": settings.log_cap_bytes,
         "retention_days": {"quiet_scheduled": QUIET_DAYS, "other": DEFAULT_DAYS},
-        "last_check_at": _iso(keeper.last_check_at),
-        "next_pass_at": _iso(keeper.next_pass_at),
+        "last_check_at": iso(keeper.last_check_at),
+        "next_pass_at": iso(keeper.next_pass_at),
         "passes": [pass_json(r) for r in records],
     }
 

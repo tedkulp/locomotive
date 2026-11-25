@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, Integer, String, Text
@@ -8,9 +9,41 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from locomotive.db import Base, UTCDateTime
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled", "interrupted", "skipped", "missed"})
-# History entries a Schedule leaves instead of a Run (never touched a host): the reason is in failure_reason.
-NON_RUN_STATUSES = frozenset({"skipped", "missed"})
+
+class RunStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELED = "canceled"  # Stop, Kill or a queue cancel
+    INTERRUPTED = "interrupted"  # cut off by a restart or shutdown; never retried
+    # History entries a Schedule leaves instead of a Run (never touched a host): the reason is in failure_reason.
+    SKIPPED = "skipped"
+    MISSED = "missed"
+
+
+class RunSource(StrEnum):
+    """Who started a Run. A Run an MCP token starts is ``mcp:<token name>`` (``mcp_source``)."""
+
+    UI = "ui"
+    SCHEDULE = "schedule"
+
+
+def mcp_source(token_name: str) -> str:
+    return f"mcp:{token_name}"
+
+
+class CheckoutKind(StrEnum):
+    CLEAN = "clean"  # a fresh export of a branch's commit
+    WORKING_COPY = "working_copy"  # in place in the Working Copy, uncommitted edits included
+
+
+ACTIVE_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING)
+TERMINAL_STATUSES = frozenset({
+    RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.INTERRUPTED, RunStatus.SKIPPED,
+    RunStatus.MISSED,
+})
+NON_RUN_STATUSES = frozenset({RunStatus.SKIPPED, RunStatus.MISSED})
 
 
 class Run(Base):

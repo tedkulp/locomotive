@@ -25,11 +25,20 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from locomotive import cron
 from locomotive.clock import Clock
-from locomotive.models import ControllerSetting, Run, Schedule
+from locomotive.models import (
+    ACTIVE_STATUSES,
+    CheckoutKind,
+    ControllerSetting,
+    Run,
+    RunSource,
+    RunStatus,
+    Schedule,
+)
 from locomotive.notifier import Notifier
 from locomotive.runlog import RunLog
 from locomotive.settings import Settings
 from locomotive.supervisor import Supervisor
+from locomotive.web import iso
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +141,7 @@ class Scheduler:
                 session.add(run)
                 session.flush()
                 RunLog(self._supervisor.log_path(run.id)).append(note, kind="locomotive")
-                (started if run.status == "queued" else ended).append(run.id)
+                (started if run.status == RunStatus.QUEUED else ended).append(run.id)
             session.commit()
         return started, ended
 
@@ -142,9 +151,9 @@ class Scheduler:
         """The Run, or skipped entry, that one (collapsed) firing produces, and its first log line."""
         run = Run(
             playbook=schedule.playbook,
-            status="queued",
-            source="schedule",
-            checkout="clean",  # scheduled Runs never use the Working Copy
+            status=RunStatus.QUEUED,
+            source=RunSource.SCHEDULE,
+            checkout=CheckoutKind.CLEAN,  # scheduled Runs never use the Working Copy
             branch=schedule.branch or self._settings.default_branch,
             check=schedule.check,
             diff=schedule.diff,
@@ -165,25 +174,25 @@ class Scheduler:
                 f"locomotive was not running: {firings} missed, the newest at {self._local(newest)}"
                 f" (more than {MISSED_GRACE_TEXT} ago)"
             )
-            self._end_entry(run, "missed", reason, now)
+            self._end_entry(run, RunStatus.MISSED, reason, now)
             return run, f"{due}. Missed: {reason}"
         previous = session.scalars(
             select(Run)
-            .where(Run.schedule_id == schedule.id, Run.status.in_(("queued", "running")))
+            .where(Run.schedule_id == schedule.id, Run.status.in_(ACTIVE_STATUSES))
             .order_by(Run.id.desc())
         ).first()
         if previous is not None:
             reason = f"the Schedule's previous Run #{previous.id} is still {previous.status}"
-            self._end_entry(run, "skipped", reason, now)
+            self._end_entry(run, RunStatus.SKIPPED, reason, now)
             return run, f"{due}. Skipped: {reason}"
         if schedule.playbook in self._settings.hidden_playbooks:
             reason = f"Playbook {schedule.playbook} is hidden on this Controller"
-            self._end_entry(run, "failed", reason, now)
+            self._end_entry(run, RunStatus.FAILED, reason, now)
             return run, f"{due}. Not run: {reason}"
         return run, f"{due}; fired a clean Run of {run.branch}"
 
     @staticmethod
-    def _end_entry(run: Run, status: str, reason: str, now: datetime) -> None:
+    def _end_entry(run: Run, status: RunStatus, reason: str, now: datetime) -> None:
         run.status, run.failure_reason, run.finished_at = status, reason, now
 
     def _local(self, when: datetime) -> str:
@@ -217,9 +226,6 @@ class Scheduler:
         return cron.next_after(schedule.cron, self.zone, after)
 
     def status(self) -> dict:
-        def iso(value: datetime | None) -> str | None:
-            return None if value is None else value.isoformat().replace("+00:00", "Z")
-
         return {
             "paused": self.paused,
             "time_zone": self.zone.key,

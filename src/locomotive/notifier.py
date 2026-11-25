@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import httpx
 from sqlalchemy.orm import Session, sessionmaker
 
-from locomotive.models import Run, Schedule
+from locomotive.models import CheckoutKind, Run, RunSource, RunStatus, Schedule
 from locomotive.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -165,13 +165,13 @@ class Notifier:
         scheduled Runs whose Schedule has notify-on-changes on. Everything else stays silent.
         """
         click = self._click(run)
-        if run.status == "missed":
+        if run.status == RunStatus.MISSED:
             name = run.schedule_name or run.playbook
             body = "\n".join([f"Playbook: {run.playbook}", run.failure_reason or "A firing was missed"])
             return Message(title=f"{name} missed", body=body, priority=HIGH, click=click)
-        if run.status in ("failed", "interrupted"):
+        if run.status in (RunStatus.FAILED, RunStatus.INTERRUPTED):
             return Message(title=f"{run.playbook} {run.status}", body=run_summary(run), priority=HIGH, click=click)
-        if run.status == "succeeded" and run.source == "schedule" and self._notify_on_changes(session, run):
+        if run.status == RunStatus.SUCCEEDED and run.source == RunSource.SCHEDULE and self._notify_on_changes(session, run):
             changed = hosts_with(run.recap, "changed")
             if changed:
                 return Message(
@@ -203,7 +203,7 @@ def run_summary(run: Run) -> str:
     source = run.source
     if run.schedule_name:
         source = f"{source} ({run.schedule_name})"
-    if run.checkout == "working_copy":
+    if run.checkout == CheckoutKind.WORKING_COPY:
         commit = "working copy"
     elif run.sha:
         commit = f"{run.sha[:7]} ({run.branch})"
@@ -223,7 +223,7 @@ def run_summary(run: Run) -> str:
     if task:
         on = ", ".join(task.get("hosts") or [])
         lines.append(f"First failed task: {task.get('name') or '(unnamed)'}" + (f" on {on}" if on else ""))
-    if run.status == "interrupted":
+    if run.status == RunStatus.INTERRUPTED:
         lines.append("Interrupted: re-run it if it still needs to happen")
     elif not run.recap:
         lines.append("Failed before Ansible touched a host (see the Run page)")

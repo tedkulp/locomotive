@@ -23,7 +23,7 @@ from locomotive import history
 from locomotive.checkout import Checkout, CheckoutError
 from locomotive.clock import Clock
 from locomotive.launch import LaunchOptions
-from locomotive.models import Run
+from locomotive.models import ACTIVE_STATUSES, CheckoutKind, Run, RunStatus
 from locomotive.notifier import Notifier
 from locomotive.rungrid import RunGrid
 from locomotive.runlog import RunLog
@@ -64,7 +64,7 @@ def resolves_hosts_at_start(run: Run) -> bool:
 
     A clean Run's host set (like its SHA) is fixed when it is queued, so what was previewed is what runs.
     """
-    return run.checkout == "working_copy"
+    return run.checkout == CheckoutKind.WORKING_COPY
 
 
 class Supervisor:
@@ -124,7 +124,7 @@ class Supervisor:
     def interrupt_leftovers(self) -> None:
         """At startup nothing is running, so a Run still marked running was cut off. Never retried."""
         with self._sessions() as session:
-            ids = list(session.scalars(select(Run.id).where(Run.status == "running")))
+            ids = list(session.scalars(select(Run.id).where(Run.status == RunStatus.RUNNING)))
         for run_id in ids:
             reason = "locomotive restarted during the Run"
             RunLog(self.log_path(run_id)).append(f"Run interrupted: {reason}", kind="locomotive")
@@ -132,7 +132,7 @@ class Supervisor:
             grid.finish()
             grid.save(self.grid_path(run_id))
             self._update(
-                run_id, status="interrupted", failure_reason=reason, finished_at=self._clock.now(),
+                run_id, status=RunStatus.INTERRUPTED, failure_reason=reason, finished_at=self._clock.now(),
                 recap=grid.recap, recap_source=grid.recap_source, first_failed_task=grid.first_failed_task,
             )
             self._ended(run_id)
@@ -148,7 +148,7 @@ class Supervisor:
         A clean Run keeps the SHA and host set it was queued with; its export is redone from that SHA.
         """
         with self._sessions() as session:
-            ids = list(session.scalars(select(Run.id).where(Run.status == "queued").order_by(Run.id)))
+            ids = list(session.scalars(select(Run.id).where(Run.status == RunStatus.QUEUED).order_by(Run.id)))
         for run_id in ids:
             RunLog(self.log_path(run_id)).append("locomotive restarted; the Run is still queued", kind="locomotive")
             self.start(run_id)
@@ -266,12 +266,12 @@ class Supervisor:
         log = self._logs[run_id]
         grid = RunGrid()
         work = self.runs_dir / str(run_id)
-        status, reason, rc = "failed", None, None
+        status, reason, rc = RunStatus.FAILED, None, None
         queued_at_shutdown = False
         try:
             rc = await self._execute(run, work, log, grid)
             if rc == 0:
-                status = "succeeded"
+                status = RunStatus.SUCCEEDED
             else:
                 reason = f"ansible-playbook failed (exit code {rc})"
         except RunCanceled:
@@ -280,7 +280,7 @@ class Supervisor:
             reason = str(exc)
         except asyncio.CancelledError:
             if run_id in self._holding:
-                status, reason = "interrupted", "locomotive shut down during the Run"
+                status, reason = RunStatus.INTERRUPTED, "locomotive shut down during the Run"
             else:
                 queued_at_shutdown = True
             raise
@@ -298,7 +298,7 @@ class Supervisor:
                 log.append("locomotive shut down; the Run stays queued", kind="locomotive")
             else:
                 fields = self._finish(run_id, log, grid, status, reason, rc, cancel, stopped)
-                if fields["status"] != "interrupted":  # shutting down: housekeeping compresses it at startup
+                if fields["status"] != RunStatus.INTERRUPTED:  # shutting down: housekeeping compresses it at startup
                     fields["log_bytes"] = await self._compress(run_id)
                 self._update(run_id, **fields)
                 self._ended(run_id)
@@ -311,12 +311,12 @@ class Supervisor:
         """The Run's last log line and final grid; returns the fields that end it."""
         # Asked to stop and Ansible never reached its final stats, or the stop plugin skipped work to end it
         # (it leaves ``stop.done``): the Run was cut short on request.
-        if cancel and status != "interrupted" and (grid.stats is None or stopped):
-            status, reason = "canceled", CANCEL_REASONS[cancel]
-        if status == "succeeded":
+        if cancel and status != RunStatus.INTERRUPTED and (grid.stats is None or stopped):
+            status, reason = RunStatus.CANCELED, CANCEL_REASONS[cancel]
+        if status == RunStatus.SUCCEEDED:
             log.append("Run succeeded", kind="locomotive")
         else:
-            verb = {"canceled": "canceled", "interrupted": "interrupted"}.get(status, "failed")
+            verb = {RunStatus.CANCELED: "canceled", RunStatus.INTERRUPTED: "interrupted"}.get(status, "failed")
             log.append(f"Run {verb}: {reason}", kind="locomotive")
         grid.finish()
         grid.save(self.grid_path(run_id))
@@ -337,7 +337,7 @@ class Supervisor:
 
     async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
         self._checkpoint(run.id)
-        if run.checkout == "working_copy":
+        if run.checkout == CheckoutKind.WORKING_COPY:
             # Runs in place; its state (HEAD, dirty, diff, untracked) is recorded as it leaves the queue.
             project = self._working_copy_path()
             work.mkdir(parents=True, exist_ok=True)  # ansible-runner's private data dir; the project is elsewhere
@@ -345,7 +345,7 @@ class Supervisor:
             project = await self._resolve_clean(run, work / "project", log)
         playbook = Path("playbooks") / run.playbook
         if not (project / playbook).is_file():
-            where = "in the Working Copy" if run.checkout == "working_copy" else f"at {(run.sha or '')[:12]}"
+            where = "in the Working Copy" if run.checkout == CheckoutKind.WORKING_COPY else f"at {(run.sha or '')[:12]}"
             raise RunFailed(f"Playbook {playbook} does not exist {where}")
 
         self._checkpoint(run.id)
@@ -393,7 +393,7 @@ class Supervisor:
         requirements changed since it was prepared. Returns the runtime the Run uses."""
         waiting_for: int | None = None
         recorded = False  # Working Copy state recorded since the Run last waited
-        prepared = toolchain_files(runtime.project) if run.checkout == "working_copy" else None
+        prepared = toolchain_files(runtime.project) if run.checkout == CheckoutKind.WORKING_COPY else None
         while True:
             changed = self._queue_changed
             self._checkpoint(run.id)
@@ -415,12 +415,12 @@ class Supervisor:
                     self._wake_queue()  # a smaller host set may unblock Runs queued behind this one
                     fresh = True
                     continue
-                if run.checkout == "working_copy" and not recorded:
+                if run.checkout == CheckoutKind.WORKING_COPY and not recorded:
                     await self._record_working_copy(run, log)
                     recorded = True
                     continue  # it awaited: look at the queue again before taking the hosts
                 self._holding.add(run.id)
-                self._update(run.id, status="running", started_at=self._clock.now(), waiting_for=None)
+                self._update(run.id, status=RunStatus.RUNNING, started_at=self._clock.now(), waiting_for=None)
                 if waiting_for is not None:
                     log.append("Hosts are free; starting", kind="locomotive")
                 return runtime
@@ -428,7 +428,7 @@ class Supervisor:
             if blocker.id != waiting_for:
                 waiting_for = blocker.id
                 self._update(run.id, waiting_for={"id": blocker.id, "playbook": blocker.playbook})
-                verb = "holds" if blocker.status == "running" else "is queued ahead for"
+                verb = "holds" if blocker.status == RunStatus.RUNNING else "is queued ahead for"
                 log.append(
                     f"Waiting for Run #{blocker.id} ({blocker.playbook}): it {verb} {', '.join(held)}",
                     kind="locomotive",
@@ -442,11 +442,11 @@ class Supervisor:
         with self._sessions() as session:
             others = session.scalars(
                 select(Run)
-                .where(Run.status.in_(("running", "queued")), Run.id != run_id, Run.hosts.is_not(None))
+                .where(Run.status.in_(ACTIVE_STATUSES), Run.id != run_id, Run.hosts.is_not(None))
                 .order_by(Run.id)
             ).all()
-        running = [r for r in others if r.status == "running"]
-        ahead = [r for r in others if r.status == "queued" and r.id < run_id]
+        running = [r for r in others if r.status == RunStatus.RUNNING]
+        ahead = [r for r in others if r.status == RunStatus.QUEUED and r.id < run_id]
         for other in (*running, *ahead):
             shared = [h for h in (other.hosts or []) if h in wanted]
             if shared:

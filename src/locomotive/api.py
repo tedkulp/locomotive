@@ -3,22 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
-from locomotive.checkout import BRANCH_NAME, PLAYBOOK_NAME, CheckoutError, UnknownBranch
+from locomotive.checkout import BRANCH_NAME, CheckoutError, UnknownBranch
 from locomotive.launch import LaunchOptions
-from locomotive.models import Run
+from locomotive.models import CheckoutKind, Run, RunSource, RunStatus
 from locomotive.preview import PreviewError
 from locomotive.rungrid import RunGrid, public_json
 from locomotive.runlog import LogTail, read_page
 from locomotive.supervisor import launch_options
+from locomotive.web import check_playbook, iso
 from locomotive.working_copy import WorkingCopyUnavailable
 
 router = APIRouter()
@@ -36,11 +35,11 @@ RUN_SOURCE_KEY = "locomotive.run_source"
 
 @router.get("/playbooks")
 async def list_playbooks(
-    request: Request, branch: str | None = None, checkout: Literal["clean", "working_copy"] = "clean"
+    request: Request, branch: str | None = None, checkout: CheckoutKind = CheckoutKind.CLEAN
 ) -> dict:
     """Playbooks in ``playbooks/`` of the chosen checkout, read now (never frozen)."""
     state = request.app.state
-    if checkout == "working_copy":
+    if checkout == CheckoutKind.WORKING_COPY:
         if branch is not None:
             raise HTTPException(status_code=422, detail="the Working Copy has no branch choice")
         try:
@@ -48,7 +47,7 @@ async def list_playbooks(
         except WorkingCopyUnavailable as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {
-            "checkout": "working_copy",
+            "checkout": CheckoutKind.WORKING_COPY,
             "branch": status.branch or "HEAD",
             "sha": status.head_sha,
             "playbooks": _playbooks(state.working_copy.list_playbooks()),
@@ -60,7 +59,7 @@ async def list_playbooks(
     except CheckoutError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
-        "checkout": "clean",
+        "checkout": CheckoutKind.CLEAN,
         "branch": listing.branch,
         "sha": listing.sha,
         "playbooks": _playbooks(listing.playbooks),
@@ -113,13 +112,6 @@ async def working_copy_status(request: Request) -> dict:
     }
 
 
-def _check_playbook(state, playbook: str) -> None:  # type: ignore[no-untyped-def]
-    if not PLAYBOOK_NAME.match(playbook):
-        raise HTTPException(status_code=422, detail=f"invalid Playbook name {playbook!r}")
-    if playbook in state.settings.hidden_playbooks:
-        raise HTTPException(status_code=422, detail=f"Playbook {playbook} is hidden on this Controller")
-
-
 # ---------------------------------------------------------------------- Previews
 
 
@@ -127,7 +119,7 @@ class RunRequest(LaunchOptions):
     """Launch options plus which checkout to run: a clean export of ``branch`` (default: the default
     branch) or the Working Copy in place (which runs whatever branch it is on)."""
 
-    checkout: Literal["clean", "working_copy"] = "clean"
+    checkout: CheckoutKind = CheckoutKind.CLEAN
     branch: str | None = Field(default=None, max_length=255)
 
     @field_validator("branch")
@@ -139,7 +131,7 @@ class RunRequest(LaunchOptions):
 
     @model_validator(mode="after")
     def _branch_only_for_clean(self) -> RunRequest:
-        if self.checkout == "working_copy" and self.branch is not None:
+        if self.checkout == CheckoutKind.WORKING_COPY and self.branch is not None:
             raise ValueError("a Working Copy Run runs the branch the Working Copy is on; don't pass a branch")
         return self
 
@@ -162,10 +154,10 @@ async def preview(body: PreviewRequest, request: Request) -> dict:
     """Hosts the Run would touch (exact), tasks that may run, tags and the inventory graph (no vars),
     from the chosen checkout: a clean ``branch`` (default: the default branch) or the Working Copy."""
     state = request.app.state
-    _check_playbook(state, body.playbook)
+    check_playbook(state.settings, body.playbook)
     options = body.launch_options()
     try:
-        if body.checkout == "working_copy":
+        if body.checkout == CheckoutKind.WORKING_COPY:
             return await state.previewer.preview_working_copy(options, state.working_copy, body.expand_includes)
         return await state.previewer.preview(
             options, body.branch or state.settings.default_branch, body.sha, body.expand_includes
@@ -183,14 +175,10 @@ async def preview(body: PreviewRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------- Runs
 
 
-def _iso(value: datetime | None) -> str | None:
-    return None if value is None else value.isoformat().replace("+00:00", "Z")
-
-
 def queue_stage(run: Run) -> str | None:
     """Where a queued Run is: ``preparing`` (fetching, installing its toolchain, resolving its hosts) or
     ``waiting`` (ready, for a Run that holds or is queued ahead for one of its hosts). None unless queued."""
-    if run.status != "queued":
+    if run.status != RunStatus.QUEUED:
         return None
     return "waiting" if run.waiting_for else "preparing"
 
@@ -218,14 +206,14 @@ def run_json(run: Run) -> dict:
         "ansible_core_version": run.ansible_core_version,
         "rc": run.rc,
         "failure_reason": run.failure_reason,
-        "created_at": _iso(run.created_at),
-        "started_at": _iso(run.started_at),
-        "finished_at": _iso(run.finished_at),
+        "created_at": iso(run.created_at),
+        "started_at": iso(run.started_at),
+        "finished_at": iso(run.finished_at),
         "duration_seconds": duration,
         "recap": run.recap,
         "recap_source": run.recap_source,
         "stop_requested": run.cancel_request == "stop" and not run.is_finished,
-        "waiting_for": run.waiting_for if run.status == "queued" else None,
+        "waiting_for": run.waiting_for if run.status == RunStatus.QUEUED else None,
         "stage": queue_stage(run),
         "dirty": run.dirty,
         "untracked": run.untracked,
@@ -245,7 +233,7 @@ def run_json(run: Run) -> dict:
         "log_state": run.log_state,
         "log_truncated": run.log_truncated,
         "log_pruned": run.log_pruned_at is not None,
-        "log_pruned_at": _iso(run.log_pruned_at),
+        "log_pruned_at": iso(run.log_pruned_at),
         "log_bytes": run.log_bytes,
     }
 
@@ -254,7 +242,7 @@ def run_json(run: Run) -> dict:
 async def start_run(body: RunRequest, request: Request) -> dict:
     """Start a Run. Options locomotive can't honour are rejected here (422), never silently ignored."""
     state = request.app.state
-    if body.checkout == "working_copy":
+    if body.checkout == CheckoutKind.WORKING_COPY:
         branch = await _working_copy_branch(request)
     else:
         branch = body.branch or state.settings.default_branch
@@ -275,7 +263,7 @@ async def run_again(run_id: int, request: Request) -> dict:
     """A new Run with the settings this one recorded (a clean Run fetches its branch afresh; a Working
     Copy Run runs the Working Copy as it is now)."""
     run = _get_run(request, run_id)
-    branch = await _working_copy_branch(request) if run.checkout == "working_copy" else run.branch
+    branch = await _working_copy_branch(request) if run.checkout == CheckoutKind.WORKING_COPY else run.branch
     return _launch(request, _launch_settings(run), branch=branch, checkout=run.checkout)
 
 
@@ -287,16 +275,16 @@ def _launch_settings(run: Run) -> LaunchOptions:
     return launch_options(run)
 
 
-def _launch(request: Request, body: LaunchOptions, branch: str, checkout: str = "clean") -> dict:
+def _launch(request: Request, body: LaunchOptions, branch: str, checkout: str = CheckoutKind.CLEAN) -> dict:
     state = request.app.state
-    _check_playbook(state, body.playbook)
+    check_playbook(state.settings, body.playbook)
     now = state.clock.now()
     with state.sessions() as session:
         run = Run(
             playbook=body.playbook,
             # Queued until its SHA and host set are fixed and no other Run holds (or is ahead for) a host.
-            status="queued",
-            source=request.scope.get(RUN_SOURCE_KEY, "ui"),
+            status=RunStatus.QUEUED,
+            source=request.scope.get(RUN_SOURCE_KEY, RunSource.UI),
             checkout=checkout,
             branch=branch,
             check=body.check,
@@ -345,7 +333,7 @@ async def get_run(run_id: int, request: Request) -> dict:
 async def get_working_copy_diff(run_id: int, request: Request) -> dict:
     """What a Working Copy Run had uncommitted: ``git diff HEAD`` (capped at ~1 MB) and untracked files."""
     run = _get_run(request, run_id)
-    if run.checkout != "working_copy":
+    if run.checkout != CheckoutKind.WORKING_COPY:
         raise HTTPException(status_code=404, detail=f"Run {run_id} is a clean Run; it has no Working Copy diff")
     return {
         "sha": run.sha,
@@ -389,7 +377,7 @@ async def kill_run(run_id: int, request: Request) -> dict:
 async def cancel_run(run_id: int, request: Request) -> dict:
     """Take a queued Run out of the queue before it touches a host; it ends as canceled."""
     run = _get_run(request, run_id)
-    if run.status != "queued" or not request.app.state.supervisor.request_cancel(run_id):
+    if run.status != RunStatus.QUEUED or not request.app.state.supervisor.request_cancel(run_id):
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not queued")
     return run_json(_get_run(request, run_id))
 

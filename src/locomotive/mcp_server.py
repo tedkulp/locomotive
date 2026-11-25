@@ -38,7 +38,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from locomotive.api import RUN_SOURCE_KEY
-from locomotive.models import TERMINAL_STATUSES
+from locomotive.models import TERMINAL_STATUSES, mcp_source
 from locomotive.settings import Settings
 
 MCP_PATH = "/mcp"
@@ -80,7 +80,7 @@ def parse_tokens(entries: list[str]) -> dict[str, str]:
                 "LOCOMOTIVE_MCP_TOKENS entries are name=<sha256 hex of the token> "
                 f"(name: lowercase letters, digits, - or _); got {name or entry!r}"
             )
-        tokens[digest] = f"mcp:{name}"
+        tokens[digest] = mcp_source(name)
     return tokens
 
 
