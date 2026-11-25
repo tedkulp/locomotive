@@ -520,47 +520,89 @@ class Supervisor:
         env["LOCOMOTIVE_STOP_FILE"] = str(self.stop_file(run.id))
         runner_out = self.history_dir(run.id) / "runner.out"
         runner_out.parent.mkdir(parents=True, exist_ok=True)
-        with runner_out.open("wb") as out:
-            proc = await asyncio.create_subprocess_exec(
-                self._settings.mise_bin, "exec", "-C", str(project), "--",
-                "ansible-runner", "run", str(work),
-                "--project-dir", str(project),
-                "--artifact-dir", str(artifacts),
-                "--ident", ident,
-                "-q",
-                "-p", str(playbook),
-                # "=" form: argparse would otherwise read "--check" as an option of its own.
-                f"--cmdline={shlex.join(cmdline)}",
-                cwd=project, env=env,
-                stdin=asyncio.subprocess.DEVNULL, stdout=out, stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
-            )
-            self._register(run.id, proc)
-            follower = EventFollower(
-                artifacts / ident / "job_events", log, grid, self.grid_path(run.id), self.stop_done_file(run.id)
-            )
-            try:
-                while proc.returncode is None:
-                    follower.poll()
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(proc.wait(), POLL_SECONDS)
-            except asyncio.CancelledError:
-                kill_group(proc.pid)
-                raise
-            follower.poll(final=True)
+        # ansible-runner's own stdout file would repeat the whole output uncapped: locomotive keeps the
+        # (capped) log instead, so runner doesn't write it.
+        settings_file = work / "env" / "settings"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text(json.dumps({"suppress_output_file": True}))  # YAML, as runner reads it
+        proc = await asyncio.create_subprocess_exec(
+            self._settings.mise_bin, "exec", "-C", str(project), "--",
+            "ansible-runner", "run", str(work),
+            "--project-dir", str(project),
+            "--artifact-dir", str(artifacts),
+            "--ident", ident,
+            "-q",
+            "-p", str(playbook),
+            # "=" form: argparse would otherwise read "--check" as an option of its own.
+            f"--cmdline={shlex.join(cmdline)}",
+            cwd=project, env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        self._register(run.id, proc)
+        assert proc.stdout is not None
+        output = asyncio.create_task(_capped_copy(proc.stdout, runner_out, RUNNER_OUT_CAP))
+        # Each event file is deleted once folded into the log and grid, so they don't pile up either.
+        follower = EventFollower(
+            artifacts / ident / "job_events", log, grid, self.grid_path(run.id), self.stop_done_file(run.id),
+            consume=True,
+        )
+        try:
+            while proc.returncode is None:
+                follower.poll()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(proc.wait(), POLL_SECONDS)
+        except asyncio.CancelledError:
+            kill_group(proc.pid)
+            output.cancel()
+            raise
+        follower.poll(final=True)
+        try:
+            tail = await asyncio.wait_for(output, OUTPUT_DRAIN_SECONDS)
+        except TimeoutError:  # a leftover grandchild holds the pipe: it was cancelled, keep going
+            tail = b""
         rc = proc.returncode
         if follower.count == 0 and rc != 0:
-            raise RunFailed(f"ansible-runner failed to start (exit code {rc}){last_line(runner_out.read_text(errors='replace'))}")
+            raise RunFailed(f"ansible-runner failed to start (exit code {rc}){last_line(tail.decode(errors='replace'))}")
         return rc
+
+
+RUNNER_OUT_CAP = 64 * 1024  # ansible-runner's own output (-q: errors only), kept head and tail
+OUTPUT_DRAIN_SECONDS = 5
+
+
+async def _capped_copy(stream: asyncio.StreamReader, path: Path, cap: int) -> bytes:
+    """Copy ``stream`` to ``path``: its first ``cap`` bytes, then (if there was more) a note of how much was
+    dropped and its last ``cap`` bytes. Returns the last ``cap`` bytes (the most telling part)."""
+    head = bytearray()
+    last = bytearray()
+    total = 0
+    while chunk := await stream.read(64 * 1024):
+        total += len(chunk)
+        if len(head) < cap:
+            head += chunk[: cap - len(head)]
+        last += chunk
+        del last[: max(0, len(last) - cap)]
+    with path.open("wb") as out:
+        out.write(head)
+        rest = total - len(head)  # bytes after the head; ``last`` ends them
+        if rest > 0:
+            kept = last[-rest:] if rest < len(last) else last
+            if rest > len(kept):
+                out.write(f"\n[locomotive: {rest - len(kept)} bytes of output dropped]\n".encode())
+            out.write(kept)
+    return bytes(last)
 
 
 class EventFollower:
     """Follows the job_events files ansible-runner writes, in counter order, into the Run log and grid."""
 
     def __init__(
-        self, directory: Path, log: RunLog, grid: RunGrid, grid_path: Path, stop_done: Path | None = None
+        self, directory: Path, log: RunLog, grid: RunGrid, grid_path: Path, stop_done: Path | None = None,
+        consume: bool = False,
     ) -> None:
         self._dir = directory
+        self._consume = consume  # delete each event file once it is folded in
         self._stop_done = stop_done
         self._log = log
         self._grid = grid
@@ -605,6 +647,8 @@ class EventFollower:
             if event.get("stdout"):
                 host = (event.get("event_data") or {}).get("host")
                 self._log.append(event["stdout"], kind="ansible", host=host)
+            if self._consume:
+                pending[counter].unlink(missing_ok=True)
 
 
 def launch_options(run: Run) -> LaunchOptions:

@@ -79,9 +79,10 @@ failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<
 delivery is retried 3 times (backoff `LOCOMOTIVE_NTFY_RETRY_SECONDS`, doubling), then recorded on the Run
 (`notification` in `GET /api/runs/<id>`, shown on the Run page); the Run's own outcome never changes.
 
-Log retention: every Run's history row is kept forever; its log, ansible-runner events and task grid
-(`<data dir>/history/<id>/`) are not. A Run's log stops at `LOCOMOTIVE_LOG_CAP_BYTES` (default 200 MB): the
-Run carries on with a complete grid and recap and is marked "log truncated". A finished Run's files are
+Log retention: every Run's history row is kept forever; its log and task grid (`<data dir>/history/<id>/`)
+are not. A Run's log stops at `LOCOMOTIVE_LOG_CAP_BYTES` (default 200 MB): the Run carries on with a complete
+grid and recap and is marked "log truncated". The cap bounds the Run's disk use: ansible-runner writes no stdout
+file, each of its event files is deleted once folded into the log and grid, and its own output is capped. A finished Run's files are
 gzip-compressed (the log in indexed ~1 MB members, so `GET /api/runs/<id>/log?after=<seq>&limit=<n>` and the
 SSE stream seek to their cursor instead of reading the whole log). Housekeeping (not a Schedule) runs at startup and daily at 04:00 in `LOCOMOTIVE_TIME_ZONE`:
 it prunes the logs of quiet scheduled Runs (no changes, no failures) after 14 days and of all other Runs after

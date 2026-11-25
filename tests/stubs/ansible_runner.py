@@ -88,7 +88,10 @@ events = conf.get("events") or [
 art = Path(args.artifact_dir or Path(args.private_data_dir) / "artifacts") / args.ident
 (art / "job_events").mkdir(parents=True, exist_ok=True)
 signal.signal(signal.SIGINT, record_signal)
-stdout = open(art / "stdout", "w")
+# Like the real one, ``suppress_output_file`` in <private data dir>/env/settings means no stdout file.
+settings_path = Path(args.private_data_dir) / "env" / "settings"
+runner_settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+stdout = open(os.devnull if runner_settings.get("suppress_output_file") else art / "stdout", "w")
 line = 0
 for counter, ev in enumerate(events, start=1):
     if conf.get("gate_after") == counter - 1:

@@ -94,6 +94,32 @@ def test_a_log_stops_at_the_cap_while_the_run_carries_on_with_a_correct_grid_and
     assert [t["name"] for t in grid["tasks"]] == ["Chatter", "Change it"]
 
 
+def _disk_bytes(*dirs) -> int:
+    return sum(p.stat().st_size for d in dirs if d.exists() for p in d.rglob("*") if p.is_file())
+
+
+def test_the_log_cap_bounds_the_runs_disk_use_while_it_runs(start_app, stubs, data_dir):
+    cap = 50_000
+    client = start_app(log_cap_bytes=cap)
+    scenario = chatty(lines=3000)  # about 4 MB of output from Ansible
+    stubs.script(runner={**scenario, "gate_after": len(scenario["events"]) - 1})  # held before the stats
+    run_id = launch(client)
+
+    def all_folded():
+        tasks = client.get(f"/api/runs/{run_id}/grid").json()["tasks"]
+        return len(tasks) == 2 and tasks[1]["results"].get("alpha") == "changed"
+
+    wait_until(all_folded, timeout=30)
+    used = _disk_bytes(data_dir / "history" / str(run_id), data_dir / "runs" / str(run_id))
+    assert used < 2 * cap, used  # the log (at the cap), the grid and a little bookkeeping
+    stubs.release_gate()
+    run = wait_for_run(client, run_id)
+    assert run["status"] == "succeeded" and run["log_truncated"] is True
+    assert run["recap"]["alpha"] == {"ok": 3001, "changed": 1, "skipped": 0, "failed": 0, "unreachable": 0}
+    assert [t["name"] for t in client.get(f"/api/runs/{run_id}/grid").json()["tasks"]] == ["Chatter", "Change it"]
+    assert run["log_bytes"] < 2 * cap
+
+
 def test_a_log_under_the_cap_is_complete(client, stubs):
     stubs.script(runner=chatty(lines=50))
 

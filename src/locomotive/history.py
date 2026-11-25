@@ -1,5 +1,6 @@
-"""A Run's kept data on disk (``history/<id>/``): its log, ansible-runner's events and output, and the
-grid. Finished Runs' files are gzip-compressed; housekeeping measures and prunes them as one unit."""
+"""A Run's kept data on disk (``history/<id>/``): its log, the grid and ansible-runner's (capped) output.
+ansible-runner's event files are deleted as the supervisor folds them into the log and grid, and runner
+writes no stdout file (both would repeat the output past the log cap); Runs from before that keep theirs. Finished Runs' files are gzip-compressed; housekeeping measures and prunes them as one unit."""
 
 from __future__ import annotations
 
@@ -107,6 +108,9 @@ def _pack_events(directory: Path) -> bool:
         return False
     names = [n for n in os.listdir(directory) if n.endswith(".json") and n.split("-", 1)[0].isdigit()]
     names.sort(key=lambda n: int(n.split("-", 1)[0]))
+    if not names:  # the supervisor deletes each event once folded into the log and grid
+        shutil.rmtree(directory, ignore_errors=True)
+        return False
     tmp = directory.with_name(directory.name + ".jsonl.gz.tmp")
     with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=GZIP_LEVEL) as dst:
         for name in names:
