@@ -306,7 +306,7 @@ function ScheduleForm({
             className={cn(INPUT, "font-mono")}
             value={form.limit ?? ""}
             onChange={(e) => set("limit", e.target.value)}
-            placeholder="servers:!pve1"
+            placeholder="web:!web3"
           />
         </Field>
         <Field label="Tags (comma separated)">

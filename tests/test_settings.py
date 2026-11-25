@@ -15,7 +15,7 @@ APP_SOURCES = [
 ]
 HOMELAB = re.compile(
     r"tedkulp|n3rd|int\.tedkulp|192\.168\.|100\.\d+\.\d+\.\d+|ntfy\.sh|hc-ping|"
-    r"Tailscale-User|/home/ted|mac\.yml|locomotive\.yml",
+    r"Tailscale-User|/home/ted|mac\.yml|locomotive\.yml|\bpve\d*\b",
     re.IGNORECASE,
 )
 
