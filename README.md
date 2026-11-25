@@ -2,7 +2,7 @@
 
 A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
 
-Status: under construction (launch form with host/task previews; clean Runs of the default branch, check or real, with their log; per-host queue).
+Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue).
 
 ## Layout
 
@@ -47,6 +47,14 @@ it at once), resolves its exact host set, then starts when no running Run holds 
 earlier-launched queued Run shares one (so no Run is starved). Meanwhile it shows `waiting_for`; `POST
 /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with the SHA and host set
 they were queued with. A Working Copy Run re-resolves its hosts as it starts and waits again on a new overlap.
+
+Working Copy Runs (`checkout: "working_copy"`, needs `LOCOMOTIVE_WORKING_COPY_PATH`) run in place in that
+clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty flag, `git diff HEAD` (capped at
+1 MB, `GET /api/runs/<id>/working-copy-diff`) and the untracked files. locomotive only reads the Working Copy
+(without git's optional locks) and runs in it: it never commits, pulls, fetches or pushes it, so the
+ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
+clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
+`LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
 
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names

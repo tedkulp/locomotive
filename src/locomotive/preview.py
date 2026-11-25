@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,8 +22,10 @@ from locomotive.checkout import Checkout, CheckoutError
 from locomotive.launch import LaunchOptions
 from locomotive.runtime import PreviewTimeout, Runtime, Toolchain, ToolchainError
 from locomotive.settings import Settings
+from locomotive.working_copy import WorkingCopy
 
 KEEP_PREPARED = 4
+TOOLCHAIN_FILES = ("mise.toml", "collections/requirements.yml")
 TASKS_LABEL = "tasks that may run"
 
 
@@ -37,6 +41,7 @@ class PreviewError(Exception):
 class _Prepared:
     task: asyncio.Task[Runtime]
     used: float
+    cleanup: bool = True  # whether evicting it deletes its dir under previews/
 
 
 class Previewer:
@@ -67,10 +72,44 @@ class Previewer:
     async def preview(
         self, options: LaunchOptions, branch: str, sha: str | None, expand_includes: bool
     ) -> dict[str, Any]:
+        """Preview a clean Run of ``branch`` (or of commit ``sha``, if the mirror already has it)."""
         deadline = time.monotonic() + self._settings.preview_timeout_seconds
         if sha is None or not await self._checkout.has_commit(sha):
             sha = await self._checkout.fetch(branch)
-        runtime = await self._runtime(sha, options.playbook, deadline)
+        runtime = await self._runtime(sha, lambda: self._prepare(sha), options.playbook, f"at {sha[:12]}", deadline)
+        reply = await self._ask(runtime, options, expand_includes, deadline)
+        return {"checkout": "clean", "branch": branch, "sha": sha, "command": options.command(), **reply}
+
+    async def preview_working_copy(
+        self, options: LaunchOptions, working_copy: WorkingCopy, expand_includes: bool
+    ) -> dict[str, Any]:
+        """Preview a Run of the Working Copy as it is on disk now, in its own runtime.
+
+        The runtime is reused only while the Working Copy's ``mise.toml`` and collections requirements are
+        unchanged, so an uncommitted toolchain bump shows up in the next preview.
+        """
+        deadline = time.monotonic() + self._settings.preview_timeout_seconds
+        status = await working_copy.status()
+        project = status.path
+        key = "wc-" + hashlib.sha256(
+            b"\0".join(_read(project / name) for name in TOOLCHAIN_FILES)
+        ).hexdigest()
+        runtime = await self._runtime(
+            key, lambda: self._toolchain.prepare(project), options.playbook, "in the Working Copy", deadline,
+            cleanup=False,
+        )
+        reply = await self._ask(runtime, options, expand_includes, deadline)
+        return {
+            "checkout": "working_copy",
+            "branch": status.branch or "HEAD",
+            "sha": status.head_sha,
+            "command": options.command(),
+            **reply,
+        }
+
+    async def _ask(
+        self, runtime: Runtime, options: LaunchOptions, expand_includes: bool, deadline: float
+    ) -> dict[str, Any]:
         try:
             reply = await self._toolchain.preview(
                 runtime, options.helper_request(expand_includes), timeout=deadline - time.monotonic()
@@ -81,15 +120,23 @@ class Previewer:
             raise PreviewError(502, str(exc)) from exc
         if not reply.get("ok"):
             raise PreviewError(422, _text(reply.get("error")) or "the preview helper reported an error")
-        return {"branch": branch, "sha": sha, "command": options.command(), **sanitize(reply)}
+        return sanitize(reply)
 
     # ------------------------------------------------------------------ prepared runtimes
 
-    async def _runtime(self, sha: str, playbook: str, deadline: float) -> Runtime:
-        prepared = self._prepared.get(sha)
+    async def _runtime(
+        self,
+        key: str,
+        prepare: Callable[[], Awaitable[Runtime]],
+        playbook: str,
+        where: str,
+        deadline: float,
+        cleanup: bool = True,
+    ) -> Runtime:
+        prepared = self._prepared.get(key)
         if prepared is None or (prepared.task.done() and prepared.task.exception() is not None):
-            prepared = _Prepared(asyncio.create_task(self._prepare(sha), name=f"preview-{sha[:12]}"), 0)
-            self._prepared[sha] = prepared
+            prepared = _Prepared(asyncio.create_task(prepare(), name=f"preview-{key[:15]}"), 0, cleanup)
+            self._prepared[key] = prepared
             self._evict()
         prepared.used = time.monotonic()
         try:
@@ -97,12 +144,12 @@ class Previewer:
             runtime = await asyncio.wait_for(asyncio.shield(prepared.task), max(deadline - time.monotonic(), 0.1))
         except TimeoutError:
             raise PreviewError(
-                504, f"Still preparing the runtime for {sha[:12]}; try the preview again shortly"
+                504, f"Still preparing the runtime {where}; try the preview again shortly"
             ) from None
         except (ToolchainError, CheckoutError) as exc:
             raise PreviewError(502, str(exc)) from exc
         if not (runtime.project / "playbooks" / playbook).is_file():
-            raise PreviewError(404, f"Playbook playbooks/{playbook} does not exist at {sha[:12]}")
+            raise PreviewError(404, f"Playbook playbooks/{playbook} does not exist {where}")
         return runtime
 
     async def _prepare(self, sha: str) -> Runtime:
@@ -120,14 +167,22 @@ class Previewer:
     def _evict(self) -> None:
         if len(self._prepared) <= KEEP_PREPARED:
             return
-        for sha, prepared in sorted(self._prepared.items(), key=lambda item: item[1].used)[: -KEEP_PREPARED]:
+        for key, prepared in sorted(self._prepared.items(), key=lambda item: item[1].used)[: -KEEP_PREPARED]:
             if not prepared.task.done():
                 continue
-            del self._prepared[sha]
-            shutil.rmtree(self.previews_dir / sha, ignore_errors=True)
+            del self._prepared[key]
+            if prepared.cleanup:  # an export of a commit; never the Working Copy
+                shutil.rmtree(self.previews_dir / key, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------- the reply, field by field
+
+
+def _read(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return b""
 
 
 def _text(value: object) -> str | None:

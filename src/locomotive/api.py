@@ -5,19 +5,21 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from sqlalchemy import select
 
-from locomotive.checkout import PLAYBOOK_NAME, CheckoutError, UnknownBranch
+from locomotive.checkout import BRANCH_NAME, PLAYBOOK_NAME, CheckoutError, UnknownBranch
 from locomotive.launch import LaunchOptions
 from locomotive.models import Run
 from locomotive.preview import PreviewError
 from locomotive.rungrid import RunGrid, public_json
 from locomotive.runlog import LogTail, RunLog
 from locomotive.supervisor import launch_options
+from locomotive.working_copy import WorkingCopyUnavailable
 
 router = APIRouter()
 
@@ -28,8 +30,24 @@ SSE_POLL_SECONDS = 0.2
 
 
 @router.get("/playbooks")
-async def list_playbooks(request: Request, branch: str | None = None) -> dict:
+async def list_playbooks(
+    request: Request, branch: str | None = None, checkout: Literal["clean", "working_copy"] = "clean"
+) -> dict:
+    """Playbooks in ``playbooks/`` of the chosen checkout, read now (never frozen)."""
     state = request.app.state
+    if checkout == "working_copy":
+        if branch is not None:
+            raise HTTPException(status_code=422, detail="the Working Copy has no branch choice")
+        try:
+            status = await state.working_copy.status()
+        except WorkingCopyUnavailable as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "checkout": "working_copy",
+            "branch": status.branch or "HEAD",
+            "sha": status.head_sha,
+            "playbooks": _playbooks(state.working_copy.list_playbooks()),
+        }
     try:
         listing = await state.checkout.list_playbooks(branch or state.settings.default_branch)
     except UnknownBranch as exc:
@@ -37,9 +55,56 @@ async def list_playbooks(request: Request, branch: str | None = None) -> dict:
     except CheckoutError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
+        "checkout": "clean",
         "branch": listing.branch,
         "sha": listing.sha,
-        "playbooks": [{"name": name, "path": f"playbooks/{name}"} for name in listing.playbooks],
+        "playbooks": _playbooks(listing.playbooks),
+    }
+
+
+def _playbooks(names: list[str]) -> list[dict]:
+    return [{"name": name, "path": f"playbooks/{name}"} for name in names]
+
+
+@router.get("/branches")
+async def list_branches(request: Request) -> dict:
+    """The remote's branches (fetched now), for a clean Run's branch dropdown."""
+    state = request.app.state
+    try:
+        branches = await state.checkout.list_branches()
+    except CheckoutError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"default": state.settings.default_branch, "branches": branches}
+
+
+# ---------------------------------------------------------------------- Working Copy
+
+
+@router.get("/working-copy")
+async def working_copy_status(request: Request) -> dict:
+    """The Working Copy's branch, HEAD, dirty and untracked files, and ahead/behind its upstream.
+
+    Ahead/behind is against the Working Copy's own remote-tracking branch as last fetched by Ted:
+    locomotive never fetches (or otherwise writes to) the Working Copy.
+    """
+    wc = request.app.state.working_copy
+    if not wc.configured:
+        return {"available": False, "reason": "no Working Copy is configured on this Controller"}
+    try:
+        status = await wc.status()
+    except WorkingCopyUnavailable as exc:
+        return {"available": False, "path": str(wc.path), "reason": str(exc)}
+    return {
+        "available": True,
+        "path": str(status.path),
+        "branch": status.branch,
+        "head_sha": status.head_sha,
+        "dirty": status.dirty,
+        "changed": status.changed,
+        "untracked": status.untracked,
+        "upstream": status.upstream,
+        "ahead": status.ahead,
+        "behind": status.behind,
     }
 
 
@@ -53,25 +118,57 @@ def _check_playbook(state, playbook: str) -> None:  # type: ignore[no-untyped-de
 # ---------------------------------------------------------------------- Previews
 
 
-class PreviewRequest(LaunchOptions):
+class RunRequest(LaunchOptions):
+    """Launch options plus which checkout to run: a clean export of ``branch`` (default: the default
+    branch) or the Working Copy in place (which runs whatever branch it is on)."""
+
+    checkout: Literal["clean", "working_copy"] = "clean"
+    branch: str | None = Field(default=None, max_length=255)
+
+    @field_validator("branch")
+    @classmethod
+    def _branch(cls, value: str | None) -> str | None:
+        if value is not None and not BRANCH_NAME.match(value):
+            raise ValueError(f"invalid branch name {value!r}")
+        return value
+
+    @model_validator(mode="after")
+    def _branch_only_for_clean(self) -> RunRequest:
+        if self.checkout == "working_copy" and self.branch is not None:
+            raise ValueError("a Working Copy Run runs the branch the Working Copy is on; don't pass a branch")
+        return self
+
+    def launch_options(self) -> LaunchOptions:
+        return LaunchOptions.model_validate(self.model_dump(exclude={"checkout", "branch"}))
+
+
+class PreviewRequest(RunRequest):
     """The launch options to preview, plus how to show includes and (optionally) which commit."""
 
     expand_includes: bool = False
     sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
+    def launch_options(self) -> LaunchOptions:
+        return LaunchOptions.model_validate(self.model_dump(exclude={"checkout", "branch", "expand_includes", "sha"}))
+
 
 @router.post("/preview")
 async def preview(body: PreviewRequest, request: Request) -> dict:
-    """Hosts the Run would touch (exact), tasks that may run, tags and the inventory graph (no vars)."""
+    """Hosts the Run would touch (exact), tasks that may run, tags and the inventory graph (no vars),
+    from the chosen checkout: a clean ``branch`` (default: the default branch) or the Working Copy."""
     state = request.app.state
     _check_playbook(state, body.playbook)
-    options = LaunchOptions.model_validate(body.model_dump(exclude={"expand_includes", "sha"}))
+    options = body.launch_options()
     try:
+        if body.checkout == "working_copy":
+            return await state.previewer.preview_working_copy(options, state.working_copy, body.expand_includes)
         return await state.previewer.preview(
-            options, state.settings.default_branch, body.sha, body.expand_includes
+            options, body.branch or state.settings.default_branch, body.sha, body.expand_includes
         )
     except PreviewError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except WorkingCopyUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except UnknownBranch as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CheckoutError as exc:
@@ -116,20 +213,39 @@ def run_json(run: Run) -> dict:
         "recap_source": run.recap_source,
         "stop_requested": run.cancel_request == "stop" and not run.is_finished,
         "waiting_for": run.waiting_for if run.status == "queued" else None,
+        "dirty": run.dirty,
+        "untracked": run.untracked,
+        "diff_truncated": run.diff_truncated,
     }
 
 
 @router.post("/runs", status_code=201)
-async def start_run(body: LaunchOptions, request: Request) -> dict:
+async def start_run(body: RunRequest, request: Request) -> dict:
     """Start a Run. Options locomotive can't honour are rejected here (422), never silently ignored."""
-    return _launch(request, body, branch=request.app.state.settings.default_branch)
+    state = request.app.state
+    if body.checkout == "working_copy":
+        branch = await _working_copy_branch(request)
+    else:
+        branch = body.branch or state.settings.default_branch
+    return _launch(request, body.launch_options(), branch=branch, checkout=body.checkout)
+
+
+async def _working_copy_branch(request: Request) -> str:
+    """The Working Copy's current branch ("HEAD" when detached); 422 if there is no usable Working Copy."""
+    try:
+        status = await request.app.state.working_copy.status()
+    except WorkingCopyUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return status.branch or "HEAD"
 
 
 @router.post("/runs/{run_id}/again", status_code=201)
 async def run_again(run_id: int, request: Request) -> dict:
-    """A new Run with the settings this one recorded (a clean Run fetches its branch afresh)."""
+    """A new Run with the settings this one recorded (a clean Run fetches its branch afresh; a Working
+    Copy Run runs the Working Copy as it is now)."""
     run = _get_run(request, run_id)
-    return _launch(request, _launch_settings(run), branch=run.branch)
+    branch = await _working_copy_branch(request) if run.checkout == "working_copy" else run.branch
+    return _launch(request, _launch_settings(run), branch=branch, checkout=run.checkout)
 
 
 def _launch_settings(run: Run) -> LaunchOptions:
@@ -140,7 +256,7 @@ def _launch_settings(run: Run) -> LaunchOptions:
     return launch_options(run)
 
 
-def _launch(request: Request, body: LaunchOptions, branch: str) -> dict:
+def _launch(request: Request, body: LaunchOptions, branch: str, checkout: str = "clean") -> dict:
     state = request.app.state
     _check_playbook(state, body.playbook)
     now = state.clock.now()
@@ -150,7 +266,7 @@ def _launch(request: Request, body: LaunchOptions, branch: str) -> dict:
             # Queued until its SHA and host set are fixed and no other Run holds (or is ahead for) a host.
             status="queued",
             source="ui",
-            checkout="clean",
+            checkout=checkout,
             branch=branch,
             check=body.check,
             diff=body.diff,
@@ -185,6 +301,21 @@ def _get_run(request: Request, run_id: int) -> Run:
 @router.get("/runs/{run_id}")
 async def get_run(run_id: int, request: Request) -> dict:
     return run_json(_get_run(request, run_id))
+
+
+@router.get("/runs/{run_id}/working-copy-diff")
+async def get_working_copy_diff(run_id: int, request: Request) -> dict:
+    """What a Working Copy Run had uncommitted: ``git diff HEAD`` (capped at ~1 MB) and untracked files."""
+    run = _get_run(request, run_id)
+    if run.checkout != "working_copy":
+        raise HTTPException(status_code=404, detail=f"Run {run_id} is a clean Run; it has no Working Copy diff")
+    return {
+        "sha": run.sha,
+        "dirty": run.dirty,
+        "diff": run.wc_diff,
+        "truncated": run.diff_truncated,
+        "untracked": run.untracked,
+    }
 
 
 @router.post("/runs/{run_id}/stop")

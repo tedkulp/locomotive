@@ -137,6 +137,9 @@ class Remote:
     def sha(self, branch: str = "main") -> str:
         return _git("rev-parse", f"refs/heads/{branch}", cwd=self.bare)
 
+    def git_refs(self) -> str:
+        return _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=self.bare)
+
 
 @pytest.fixture
 def remote(tmp_path: Path) -> Remote:
@@ -153,6 +156,57 @@ def remote(tmp_path: Path) -> Remote:
     _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=work)
     _git("fetch", "-q", "origin", cwd=work)
     return Remote(bare=bare, work=work)
+
+
+@dataclass
+class WorkingCopy:
+    """A temp clone of the remote standing in for Ted's Working Copy (never the real one)."""
+
+    path: Path
+
+    def git(self, *args: str) -> str:
+        return _git(*args, cwd=self.path)
+
+    def write(self, files: dict[str, str | None]) -> None:
+        """Edit files without committing (None deletes)."""
+        for rel, content in files.items():
+            target = self.path / rel
+            if content is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+
+    def commit(self, files: dict[str, str | None], message: str = "local change") -> str:
+        """A local commit, not pushed (makes the Working Copy ahead of origin)."""
+        self.write(files)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.head()
+
+    def head(self) -> str:
+        return self.git("rev-parse", "HEAD")
+
+    def git_state(self) -> dict[str, str]:
+        """Every file under .git with its content hash: any write to the repo shows up here."""
+        import hashlib
+
+        git_dir = self.path / ".git"
+        return {
+            str(p.relative_to(git_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(git_dir.rglob("*"))
+            if p.is_file()
+        }
+
+
+@pytest.fixture
+def working_copy(tmp_path: Path, remote: Remote) -> WorkingCopy:
+    path = tmp_path / "src" / "ansible"
+    path.parent.mkdir(parents=True)
+    _git("clone", "-q", remote.url, str(path), cwd=tmp_path)
+    _git("config", "user.name", "test", cwd=path)
+    _git("config", "user.email", "test@example.invalid", cwd=path)
+    return WorkingCopy(path=path)
 
 
 # --------------------------------------------------------------------------- stub executables
