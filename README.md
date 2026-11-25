@@ -109,7 +109,8 @@ Tools: `list_playbooks`, `list_branches`, `working_copy_status`, `list_schedules
 `list_tags`, `preview_hosts`, `preview_tasks`, `list_runs`, `get_run`, `start_run` (check by default; a
 real Run needs `confirm: true`; `source: clean | working_copy`, `branch`; returns the queued or running
 Run at once), `tail_run_output(run_id, cursor)` and `wait_for_run(run_id, max_seconds <= 30)`. Each
-tool adapts the HTTP API in-process, so it validates and fails exactly as the UI does, and answers
+tool adapts the HTTP API in-process, so it validates and fails exactly as the UI does (an argument a
+tool doesn't define fails the call, never dropped), and answers
 within `LOCOMOTIVE_MCP_TOOL_BUDGET_SECONDS` (default 9) except `wait_for_run`, which takes what it is asked for
 (default 8s).
 

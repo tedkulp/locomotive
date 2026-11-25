@@ -32,7 +32,7 @@ from fastapi import APIRouter, FastAPI
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -207,6 +207,7 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
 
     def tool(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         server.tool()(_within(budget, fn.__name__)(fn))
+        _forbid_extra_arguments(server, fn.__name__)
         return fn
 
     async def _preview(
@@ -391,12 +392,24 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
             await asyncio.sleep(min(WAIT_POLL_SECONDS, max(deadline - time.monotonic(), 0)))
 
     server.tool()(_within(MAX_WAIT_SECONDS + budget, "wait_for_run")(wait_for_run))
+    _forbid_extra_arguments(server, "wait_for_run")
 
     mcp_app: Starlette = server.streamable_http_app(
         streamable_http_path=MCP_PATH,
         transport_security=_transport_security(settings.public_hostname),
     )
     return server, BearerGuard(mcp_app, tokens)
+
+
+def _forbid_extra_arguments(server: MCPServer, name: str) -> None:
+    """An argument the tool doesn't define fails the call (and the schema says so), as the HTTP API's
+    ``extra="forbid"`` does: an option locomotive can't honour is never silently dropped."""
+    registered = server._tool_manager.get_tool(name)
+    assert registered is not None
+    metadata = registered.fn_metadata
+    base = metadata.arg_model
+    metadata.arg_model = type(base.__name__, (base,), {"model_config": ConfigDict(**base.model_config, extra="forbid")})
+    registered.parameters["additionalProperties"] = False
 
 
 def _transport_security(public_hostname: str | None) -> TransportSecuritySettings:

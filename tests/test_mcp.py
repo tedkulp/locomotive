@@ -361,3 +361,14 @@ def test_a_tool_that_would_take_too_long_answers_in_budget(start_app, stubs) -> 
 
     assert time.monotonic() - started < 3
     assert "did not answer within 1s" in error
+
+
+def test_unknown_tool_arguments_fail_the_call_instead_of_being_dropped(mcp: McpCaller, stubs, client) -> None:
+    stubs.script(preview=preview_for(["alpha"]))
+
+    error = mcp.error("start_run", playbook="servers.yml", skip_tags=["slow"], forks=50)
+
+    assert "skip_tags" in error and "forks" in error
+    assert client.get("/api/runs").json()["runs"] == []  # nothing was started
+    for tool, args in (("get_run", {"run_id": 1, "verbose": True}), ("list_branches", {"remote": "x"})):
+        assert mcp.call(tool, **args).is_error, tool
