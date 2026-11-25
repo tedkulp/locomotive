@@ -48,7 +48,14 @@ export function RunPage() {
           )}
         </div>
       )}
-      {run.checkout === "working_copy" && run.sha && <WorkingCopyChanges run={run} />}
+      {run.checkout === "working_copy" &&
+        (run.sha ? (
+          <WorkingCopyChanges run={run} />
+        ) : run.status === "queued" ? (
+          <div className="px-6 py-2 border-b border-amber-200 bg-amber-50 text-sm text-amber-900">
+            Working Copy state is recorded when the Run starts
+          </div>
+        ) : null)}
       {run.failure_reason && (
         <div
           className={cn(
