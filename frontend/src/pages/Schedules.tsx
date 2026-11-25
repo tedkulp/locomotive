@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/card";
 import { usePolling } from "@/hooks/usePolling";
 import { useScheduler } from "@/hooks/useScheduler";
 import { api, type Schedule, type ScheduleSettings } from "@/lib/api";
+import { parseExtraVars } from "@/lib/extraVars";
 import { formatWhen, statusTone } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -227,14 +228,10 @@ function ScheduleForm({
 
   const save = async () => {
     setError(null);
-    let extra: Record<string, unknown> = {};
-    if (extraVars.trim()) {
-      try {
-        extra = JSON.parse(extraVars);
-      } catch {
-        setError("Extra vars must be a JSON object");
-        return;
-      }
+    const extra = parseExtraVars(extraVars);
+    if ("error" in extra) {
+      setError(extra.error);
+      return;
     }
     const body: ScheduleSettings = {
       ...form,
@@ -243,7 +240,7 @@ function ScheduleForm({
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean),
-      extra_vars: extra,
+      extra_vars: extra.vars,
     };
     setSaving(true);
     try {
