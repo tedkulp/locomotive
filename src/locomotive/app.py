@@ -12,6 +12,7 @@ from locomotive.checkout import Checkout
 from locomotive.clock import Clock, SystemClock
 from locomotive.db import make_engine, make_sessionmaker, migrate
 from locomotive.guard import AccessGuard, parse_networks
+from locomotive.notifier import Notifier
 from locomotive.settings import Settings
 from locomotive.preview import Previewer
 from locomotive.runtime import Toolchain
@@ -32,14 +33,15 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         checkout = Checkout(settings)
         working_copy = WorkingCopy(settings.working_copy_path, settings.hidden_playbooks)
         toolchain = Toolchain(settings)
-        supervisor = Supervisor(settings, clock, sessions, checkout, toolchain, working_copy)
+        notifier = Notifier(settings, sessions)
+        supervisor = Supervisor(settings, clock, sessions, checkout, toolchain, working_copy, notifier)
         supervisor.sweep_orphans()
         supervisor.interrupt_leftovers()
         supervisor.resume_queued()
         previewer = Previewer(settings, checkout, toolchain)
         previewer.sweep()
         # After resume_queued: a firing must see the queued Runs that survived the restart.
-        scheduler = Scheduler(settings, clock, sessions, supervisor)
+        scheduler = Scheduler(settings, clock, sessions, supervisor, notifier)
         app.state.settings = settings
         app.state.clock = clock
         app.state.sessions = sessions
@@ -49,6 +51,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
         app.state.toolchain = toolchain
         app.state.previewer = previewer
         app.state.scheduler = scheduler
+        app.state.notifier = notifier
         scheduler.start()
         try:
             yield
@@ -56,6 +59,7 @@ def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
             await scheduler.shutdown()
             await previewer.shutdown()
             await supervisor.shutdown()
+            await notifier.shutdown()  # after the supervisor: Runs it interrupted still notify
             engine.dispose()
 
     app = FastAPI(title="locomotive", lifespan=lifespan)

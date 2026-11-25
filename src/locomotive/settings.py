@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     ntfy_url: str | None = None
     ntfy_topic: str | None = None
     ntfy_token: SecretStr | None = None
+    # A failed delivery is retried 3 times, waiting this long, then twice, then four times as long.
+    ntfy_retry_seconds: float = 5.0
     healthchecks_url: str | None = None
 
     # Schedules: cron times are read in this IANA time zone (unset: TZ, then /etc/localtime, then UTC).
@@ -55,6 +57,10 @@ class Settings(BaseSettings):
 
     # Previews must answer within the 10s MCP budget; the helper itself is killed after this long.
     preview_timeout_seconds: float = 8.0
+
+    # Where Ted opens locomotive (e.g. https://locomotive.example.com): notifications link to the Run page
+    # there. Unset: notifications carry no click-through.
+    public_url: str | None = None
 
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None

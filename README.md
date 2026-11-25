@@ -69,6 +69,16 @@ Schedule or pausing all of them (`PUT /api/scheduler {"paused": true}`, shown as
 with no record; re-enabling or resuming doesn't catch up. The loop also sends the Scheduler Ping (GET
 `LOCOMOTIVE_HEALTHCHECKS_URL`) every 5 minutes, retrying a failed one on the next tick.
 
+Notifications go straight to ntfy (`LOCOMOTIVE_NTFY_URL`, `_TOPIC`, `_TOKEN`; unset URL or topic = off), one
+message per notable Run: failed or interrupted (any source) and missed Schedule firings at priority 4, and a
+scheduled Run that changed hosts at priority 3 when its Schedule's notify-on-changes is on. Successful
+hand-started and MCP Runs, canceled Runs and skipped firings stay silent. Titles: `<Playbook> failed` /
+`<Playbook> interrupted` / `<Playbook>: changes on N hosts` / `<Schedule> missed`. The body has the source,
+check mode, short SHA (or "working copy"), duration, failed/unreachable/changed hosts with counts and the first
+failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<id>` when that is set. A failed
+delivery is retried 3 times (backoff `LOCOMOTIVE_NTFY_RETRY_SECONDS`, doubling), then recorded on the Run
+(`notification` in `GET /api/runs/<id>`, shown on the Run page); the Run's own outcome never changes.
+
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names
 only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventory` is never used.

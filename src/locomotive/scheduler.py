@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from locomotive import cron
 from locomotive.clock import Clock
 from locomotive.models import ControllerSetting, Run, Schedule
+from locomotive.notifier import Notifier
 from locomotive.runlog import RunLog
 from locomotive.settings import Settings
 from locomotive.supervisor import Supervisor
@@ -46,9 +47,15 @@ class PingFailed(Exception):
 
 class Scheduler:
     def __init__(
-        self, settings: Settings, clock: Clock, sessions: sessionmaker, supervisor: Supervisor
+        self,
+        settings: Settings,
+        clock: Clock,
+        sessions: sessionmaker,
+        supervisor: Supervisor,
+        notifier: Notifier | None = None,
     ) -> None:
         self._settings = settings
+        self._notifier = notifier
         self._clock = clock
         self._sessions = sessions
         self._supervisor = supervisor
@@ -79,8 +86,12 @@ class Scheduler:
 
     async def tick(self) -> None:
         now = self._clock.now().astimezone(UTC)
-        for run_id in self._fire_due(now):
+        started, ended = self._fire_due(now)
+        for run_id in started:
             self._supervisor.start(run_id)
+        if self._notifier is not None:
+            for run_id in ended:  # missed, skipped or failed entries: the notifier picks the notable ones
+                self._notifier.run_finished(run_id)
         await self._ping(now)
         self.last_tick_at = now
 
@@ -103,9 +114,10 @@ class Scheduler:
 
     # ------------------------------------------------------------------ firing
 
-    def _fire_due(self, now: datetime) -> list[int]:
-        """Deal with every due firing; returns the Runs to start."""
+    def _fire_due(self, now: datetime) -> tuple[list[int], list[int]]:
+        """Deal with every due firing; returns the Runs to start and the entries that ended at once."""
         started: list[int] = []
+        ended: list[int] = []
         paused = self.paused
         with self._sessions() as session:
             for schedule in session.scalars(select(Schedule).order_by(Schedule.id)).all():
@@ -120,10 +132,9 @@ class Scheduler:
                 session.add(run)
                 session.flush()
                 RunLog(self._supervisor.log_path(run.id)).append(note, kind="locomotive")
-                if run.status == "queued":
-                    started.append(run.id)
+                (started if run.status == "queued" else ended).append(run.id)
             session.commit()
-        return started
+        return started, ended
 
     def _firing(
         self, session: Session, schedule: Schedule, mark: datetime, newest: datetime, now: datetime

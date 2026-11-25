@@ -118,6 +118,15 @@ class RunGrid:
         return {host: dict(counts) for host, counts in self.counts.items()}
 
     @property
+    def first_failed_task(self) -> dict[str, Any] | None:
+        """The first task (in run order) that failed on some host, with those hosts. Ignored errors don't count."""
+        for row in self.tasks:
+            hosts = [host for host, status in row["results"].items() if status == "failed"]
+            if hosts:
+                return {"name": row["name"], "hosts": hosts}
+        return None
+
+    @property
     def recap_source(self) -> str:
         return "ansible" if self.stats is not None else "locomotive"
 

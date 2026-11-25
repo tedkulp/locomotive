@@ -51,6 +51,13 @@ class Run(Base):
     # Set on scheduled Runs and skipped/missed entries; the name is kept if the Schedule is deleted.
     schedule_id: Mapped[int | None] = mapped_column(Integer, index=True)
     schedule_name: Mapped[str | None] = mapped_column(String(255))
+    # The first task that failed on some host, {"name", "hosts"}, set when the Run ends.
+    first_failed_task: Mapped[dict | None] = mapped_column(JSON)
+    # ntfy delivery of this Run's notification: None (none due), "pending", "sent" or "failed".
+    # Never affects the Run's own status.
+    notification_status: Mapped[str | None] = mapped_column(String(16))
+    notification_attempts: Mapped[int | None] = mapped_column(Integer)
+    notification_error: Mapped[str | None] = mapped_column(Text)
 
     @property
     def is_finished(self) -> bool:

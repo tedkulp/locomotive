@@ -39,6 +39,10 @@ export interface Run {
   waiting_for: { id: number; playbook: string } | null;
   /** The Schedule that fired this Run (or left this skipped/missed entry). */
   schedule: { id: number | null; name: string } | null;
+  /** The first task that failed on some host, set when the Run ends. */
+  first_failed_task: { name: string; hosts: string[] } | null;
+  /** ntfy delivery of this Run's notification; null when it wasn't notable. Never changes the Run's status. */
+  notification: { status: "pending" | "sent" | "failed"; attempts: number | null; error: string | null } | null;
   /** Working Copy Runs only (null for clean Runs). */
   dirty: boolean | null;
   untracked: string[] | null;

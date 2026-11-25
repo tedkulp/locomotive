@@ -22,6 +22,7 @@ from locomotive.checkout import Checkout, CheckoutError
 from locomotive.clock import Clock
 from locomotive.launch import LaunchOptions
 from locomotive.models import Run
+from locomotive.notifier import Notifier
 from locomotive.rungrid import RunGrid
 from locomotive.runlog import RunLog
 from locomotive.runtime import Runtime, Toolchain, ToolchainError, kill_group, last_line, signal_group
@@ -63,8 +64,10 @@ class Supervisor:
         checkout: Checkout,
         toolchain: Toolchain,
         working_copy: WorkingCopy | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         self._settings = settings
+        self._notifier = notifier
         self._working_copy = working_copy or WorkingCopy(settings.working_copy_path, settings.hidden_playbooks)
         self._clock = clock
         self._sessions = sessions
@@ -118,8 +121,14 @@ class Supervisor:
             grid.save(self.grid_path(run_id))
             self._update(
                 run_id, status="interrupted", failure_reason=reason, finished_at=self._clock.now(),
-                recap=grid.recap, recap_source=grid.recap_source,
+                recap=grid.recap, recap_source=grid.recap_source, first_failed_task=grid.first_failed_task,
             )
+            self._ended(run_id)
+
+    def _ended(self, run_id: int) -> None:
+        """The Run reached its final status: tell the notifier (which decides whether it is notable)."""
+        if self._notifier is not None:
+            self._notifier.run_finished(run_id)
 
     def resume_queued(self) -> None:
         """Queued Runs haven't touched a host, so they survive a restart and carry on waiting.
@@ -285,8 +294,9 @@ class Supervisor:
         grid.save(self.grid_path(run_id))
         self._update(
             run_id, status=status, failure_reason=reason, rc=rc, finished_at=self._clock.now(),
-            recap=grid.recap, recap_source=grid.recap_source,
+            recap=grid.recap, recap_source=grid.recap_source, first_failed_task=grid.first_failed_task,
         )
+        self._ended(run_id)
 
     async def _execute(self, run: Run, work: Path, log: RunLog, grid: RunGrid) -> int:
         self._checkpoint(run.id)

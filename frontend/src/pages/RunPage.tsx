@@ -58,6 +58,12 @@ export function RunPage() {
           {run.failure_reason}
         </div>
       )}
+      {run.notification?.status === "failed" && (
+        <div className="px-6 py-2 border-b border-amber-200 bg-amber-50 text-sm text-amber-800">
+          The ntfy notification for this Run could not be delivered after {run.notification.attempts} attempts
+          {run.notification.error ? ` (${run.notification.error})` : ""}.
+        </div>
+      )}
       {grid && grid.tasks.length > 0 && (
         <TaskGrid grid={grid} live={live} hostFilter={hostFilter} onHost={toggleHost} />
       )}

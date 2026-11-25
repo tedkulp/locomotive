@@ -217,6 +217,14 @@ def run_json(run: Run) -> dict:
         "untracked": run.untracked,
         "diff_truncated": run.diff_truncated,
         "schedule": None if run.schedule_name is None else {"id": run.schedule_id, "name": run.schedule_name},
+        "first_failed_task": run.first_failed_task,
+        # ntfy delivery of this Run's notification (None: it wasn't notable). The error never holds the
+        # token or the ntfy URL.
+        "notification": None if run.notification_status is None else {
+            "status": run.notification_status,
+            "attempts": run.notification_attempts,
+            "error": run.notification_error,
+        },
     }
 
 

@@ -266,12 +266,15 @@ class CapturedRequest:
     path: str
     headers: dict[str, str]
     body: bytes
+    at: float = 0.0  # time.monotonic() when it arrived
 
 
 class FakeHTTP:
     def __init__(self) -> None:
         self.requests: list[CapturedRequest] = []
         self.status = 200
+        # Answers for the next requests, in order (then ``status``): scripts delivery failures.
+        self.statuses: list[int] = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -279,9 +282,9 @@ class FakeHTTP:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b""
                 fake.requests.append(
-                    CapturedRequest(self.command, self.path, dict(self.headers), body)
+                    CapturedRequest(self.command, self.path, dict(self.headers), body, time.monotonic())
                 )
-                self.send_response(fake.status)
+                self.send_response(fake.statuses.pop(0) if fake.statuses else fake.status)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
