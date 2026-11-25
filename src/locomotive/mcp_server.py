@@ -360,11 +360,11 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
                 f"log_pruned: Run {run_id}'s log was pruned on {run.get('log_pruned_at')}; its record and "
                 "recap remain (get_run)"
             )
-        reply = await http.call("GET", f"/api/runs/{run_id}/log", params={"after": cursor})
+        reply = await http.call("GET", f"/api/runs/{run_id}/log", params={"after": cursor, "limit": max_lines})
         lines = reply["lines"]
         page: list[dict[str, Any]] = []
         size = 0
-        for line in lines[:max_lines]:
+        for line in lines:
             size += len(line["text"]) + 32
             if page and size > MAX_TAIL_BYTES:
                 break
@@ -375,7 +375,7 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
             "finished": run["status"] in TERMINAL_STATUSES,
             "lines": page,
             "cursor": page[-1]["seq"] if page else cursor,
-            "more": len(page) < len(lines),
+            "more": len(page) < len(lines) or reply["more"],
         }
 
     async def wait_for_run(

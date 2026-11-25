@@ -10,13 +10,15 @@ import shutil
 from pathlib import Path
 
 GZIP_LEVEL = 6  # most of the gain of 9 at a fraction of the time on a 200 MB log
-PLAIN_FILES = ("log.jsonl", "runner.out")
+LOG_FILE = "log.jsonl"
+PLAIN_FILES = ("runner.out",)
+MEMBER_BYTES = 1024 * 1024  # the log's gzip members: a reader seeks to one and decompresses at most this
 
 
 def compress(directory: Path) -> bool:
     """Gzip a finished Run's files in place: the log, ansible-runner's output, and its job events (packed
     into one ``job_events.jsonl.gz``, in counter order). True if there was anything left to compress."""
-    done = False
+    done = _gzip_log(directory / LOG_FILE)
     for name in PLAIN_FILES:
         done |= _gzip(directory / name)
     artifacts = directory / "artifacts"
@@ -53,6 +55,49 @@ def _gzip(path: Path) -> bool:
     with path.open("rb") as src, gzip.open(tmp, "wb", compresslevel=GZIP_LEVEL) as dst:
         shutil.copyfileobj(src, dst, 1024 * 1024)
     tmp.replace(target)  # a reader sees the plain file, or the whole gzip (offsets are the same)
+    path.unlink()
+    return True
+
+
+def _gzip_log(path: Path) -> bool:
+    """Gzip the log as a series of members of about ``MEMBER_BYTES`` (whole lines each) plus an index of
+    ``[first seq, plain offset, gzip offset]`` per member, so a reader can start anywhere (``runlog``)."""
+    if not path.is_file() or path.is_symlink():
+        return False
+    target = path.with_name(path.name + ".gz")
+    tmp = path.with_name(path.name + ".gz.tmp")
+    index: list[list[int]] = []
+    plain = packed = 0
+    with path.open("rb") as src, tmp.open("wb") as dst:
+        chunk: list[bytes] = []
+        size = 0
+
+        def flush() -> None:
+            nonlocal plain, packed, chunk, size
+            if not chunk:
+                return
+            try:
+                first = int(json.loads(chunk[0])["seq"])
+            except (ValueError, KeyError, TypeError):
+                first = index[-1][0] if index else 0
+            member = gzip.compress(b"".join(chunk), compresslevel=GZIP_LEVEL, mtime=0)
+            index.append([first, plain, packed])
+            dst.write(member)
+            plain += size
+            packed += len(member)
+            chunk, size = [], 0
+
+        for raw in src:
+            chunk.append(raw)
+            size += len(raw)
+            if size >= MEMBER_BYTES:
+                flush()
+        flush()
+    idx = path.with_name(path.name + ".idx")
+    idx_tmp = path.with_name(path.name + ".idx.tmp")
+    idx_tmp.write_text(json.dumps(index))
+    idx_tmp.replace(idx)  # in place before the gzip: a reader takes the plain log while it exists
+    tmp.replace(target)
     path.unlink()
     return True
 

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
@@ -17,13 +17,14 @@ from locomotive.launch import LaunchOptions
 from locomotive.models import Run
 from locomotive.preview import PreviewError
 from locomotive.rungrid import RunGrid, public_json
-from locomotive.runlog import LogTail, RunLog
+from locomotive.runlog import LogTail, read_page
 from locomotive.supervisor import launch_options
 from locomotive.working_copy import WorkingCopyUnavailable
 
 router = APIRouter()
 
 SSE_POLL_SECONDS = 0.2
+LOG_PAGE_LINES = 10_000  # most lines one GET /runs/{id}/log returns (and one SSE read sends)
 
 # Who launched a Run, as recorded in history. Set in the ASGI scope only by locomotive itself (the MCP
 # server puts ``mcp:<token name>`` here); a request from outside can't set it, so it is "ui".
@@ -402,14 +403,17 @@ async def get_grid(run_id: int, request: Request) -> dict:
 
 
 @router.get("/runs/{run_id}/log")
-async def get_log(run_id: int, request: Request, after: int = 0, host: str | None = None) -> dict:
-    """The log after line ``after``; with ``host``, only that host's lines plus lines about no host."""
+async def get_log(
+    run_id: int, request: Request, after: int = 0, host: str | None = None,
+    limit: int = Query(default=LOG_PAGE_LINES, ge=1, le=LOG_PAGE_LINES),
+) -> dict:
+    """Up to ``limit`` log lines after line ``after``; with ``host``, only that host's lines plus lines
+    about no host. ``more``: further lines are already there. Read from ``after`` on (never the whole log)
+    and off the event loop."""
     _not_pruned(request, run_id)
     path = request.app.state.supervisor.log_path(run_id)
-    lines = RunLog.read(path, after)
-    if host is not None:
-        lines = [line for line in lines if line.host in (None, host)]
-    return {"lines": [line.__dict__ for line in lines]}
+    lines, more = await asyncio.to_thread(read_page, path, after, limit, host)
+    return {"lines": [line.__dict__ for line in lines], "more": more}
 
 
 @router.get("/runs/{run_id}/log/stream")
@@ -430,18 +434,20 @@ async def stream_log(
     async def events() -> AsyncIterator[str]:
         nonlocal after
         idle = 0.0
-        tail = LogTail(path, after)
+        tail = LogTail(path, after, max_lines=LOG_PAGE_LINES)
         grid_stamp: tuple[int, int, int] | None = None
         while True:
             run = _get_run(request, run_id)  # status first: a finished Run has written its whole log
-            lines = tail.read()
+            lines = await asyncio.to_thread(tail.read)
             for line in lines:
                 data = json.dumps(line.__dict__)
                 yield f"id: {line.seq}\nevent: log\ndata: {data}\n\n"
+            if len(lines) >= LOG_PAGE_LINES:
+                continue  # more is there already: send it before anything else
             stamp = _stamp(grid_path)
             if stamp != grid_stamp:
                 grid_stamp = stamp
-                grid = public_json(RunGrid.load(grid_path).to_json())
+                grid = public_json((await asyncio.to_thread(RunGrid.load, grid_path)).to_json())
                 yield f"event: grid\ndata: {json.dumps(grid)}\n\n"
             if run.is_finished:
                 yield f"event: end\ndata: {json.dumps(run_json(run))}\n\n"

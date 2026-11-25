@@ -372,3 +372,37 @@ def test_unknown_tool_arguments_fail_the_call_instead_of_being_dropped(mcp: McpC
     assert client.get("/api/runs").json()["runs"] == []  # nothing was started
     for tool, args in (("get_run", {"run_id": 1, "verbose": True}), ("list_branches", {"remote": "x"})):
         assert mcp.call(tool, **args).is_error, tool
+
+
+# 300k log lines (about 40 MB before compression), written in 30 events.
+BIG_OUTPUT = {"events": [
+    {"event": "runner_on_ok", "stdout": "\n".join(f"ok: [alpha] line {e:02d}-{n:05d} " + "x" * 60 for n in range(10_000)),
+     "event_data": {"host": "alpha"}}
+    for e in range(30)
+]}
+
+
+def test_tail_run_output_stays_fast_on_a_large_finished_log(start_app, stubs) -> None:
+    client = start_app(mcp_tool_budget_seconds=1)
+    mcp = McpCaller(str(client.base_url), LXC_TOKEN)
+    stubs.script(runner=BIG_OUTPUT)
+    run = mcp.ok("start_run", playbook="servers.yml")
+    run = wait_for_run(client, run["id"], timeout=120)
+    assert run["status"] == "succeeded"
+    end = client.get(f"/api/runs/{run['id']}/log", params={"after": 300_000}).json()["lines"][-1]["seq"]
+
+    # Reading from a cursor costs what is read, not the size of the log before it.
+    for after in (0, end // 2, end - 5):
+        started = time.monotonic()
+        lines = client.get(f"/api/runs/{run['id']}/log", params={"after": after, "limit": 1000}).json()["lines"]
+        assert time.monotonic() - started < 0.2, after
+        assert lines[0]["seq"] == after + 1 and len(lines) == min(1000, end - after)
+
+    for cursor in (0, end // 2, end - 5):
+        started = time.monotonic()
+        page = mcp.ok("tail_run_output", run_id=run["id"], cursor=cursor, max_lines=1000)
+        assert time.monotonic() - started < 1.5, cursor
+        assert page["lines"][0]["seq"] == cursor + 1
+        assert page["finished"] is True
+    assert page["lines"][-1]["text"] == "Run succeeded"
+    assert page["more"] is False

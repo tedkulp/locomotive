@@ -1,7 +1,8 @@
 """A Run's log: an append-only file of numbered lines in the Run's data directory.
 
 While the Run goes it is plain JSON lines (``log.jsonl``); once it has finished it is gzip-compressed
-(``log.jsonl.gz``, see ``history``). Readers take whichever is there.
+(``log.jsonl.gz`` in gzip members of about 1 MB, indexed by ``log.jsonl.idx``, see ``history``). Readers take
+whichever is there and seek to where they start reading, so a read costs what it returns.
 """
 
 from __future__ import annotations
@@ -29,16 +30,101 @@ def gz_path(path: Path) -> Path:
     return path.with_name(path.name + ".gz")
 
 
-def open_log(path: Path) -> IO[bytes] | None:
-    """The log as a binary stream (decompressed if the Run is finished); None if there is none."""
+def index_path(path: Path) -> Path:
+    """The gzipped log's index: ``[[first seq, plain offset, gzip offset], ...]``, one per gzip member."""
+    return path.with_name(path.name + ".idx")
+
+
+def _open_at(path: Path, after: int = 0, offset: int | None = None) -> tuple[IO[bytes], int] | None:
+    """The log as a binary stream positioned on a line boundary, and that position as a plain-log offset.
+
+    At plain offset ``offset`` if given, else early enough that reading on finds every line with seq >
+    ``after``, without reading what comes before: a binary search over the plain log (seqs only grow), or
+    the index into the gzipped one's members. None if there is no log.
+    """
     try:
-        return path.open("rb")
+        f = path.open("rb")
     except FileNotFoundError:
-        pass
+        return _open_gz_at(path, after, offset)
+    pos = offset if offset is not None else _bisect(f, after)
+    f.seek(pos)
+    return f, pos
+
+
+SCAN_BYTES = 64 * 1024  # below this, scanning beats seeking
+
+
+def _bisect(f: IO[bytes], after: int) -> int:
+    """A line start in the plain log with only lines of seq <= ``after`` before it."""
+    lo, hi = 0, f.seek(0, 2)
+    while hi - lo > SCAN_BYTES:
+        mid = (lo + hi) // 2
+        f.seek(mid)
+        f.readline()  # to the next line start
+        start = f.tell()
+        raw = f.readline()
+        if start >= hi or not raw.endswith(b"\n"):
+            hi = mid
+        elif json.loads(raw)["seq"] <= after:
+            lo = start + len(raw)
+        else:
+            hi = mid
+    return lo
+
+
+def _open_gz_at(path: Path, after: int, offset: int | None) -> tuple[IO[bytes], int] | None:
     try:
-        return gzip.open(gz_path(path), "rb")
+        raw = gz_path(path).open("rb")
     except FileNotFoundError:
         return None
+    try:
+        index = json.loads(index_path(path).read_text())
+    except (OSError, ValueError):
+        index = []  # compressed before members were indexed: read from the start
+    entry = [0, 0, 0]
+    for item in index:
+        if (item[1] <= offset) if offset is not None else (item[0] <= after + 1):
+            entry = item
+        else:
+            break
+    raw.seek(entry[2])
+    f = gzip.GzipFile(fileobj=raw, mode="rb")
+    f.myfileobj = raw  # closed with the GzipFile, as gzip.open does
+    pos = entry[1]
+    while offset is not None and pos < offset:  # within one member: at most a member's worth
+        chunk = f.read(min(offset - pos, 1024 * 1024))
+        if not chunk:
+            break
+        pos += len(chunk)
+    return f, pos
+
+
+def _line(item: dict) -> LogLine:
+    return LogLine(item["seq"], item["text"], item["kind"], item.get("host"))
+
+
+def read_page(
+    path: Path, after: int = 0, limit: int | None = None, host: str | None = None
+) -> tuple[list[LogLine], bool]:
+    """Complete lines with seq > ``after`` (with ``host``: that host's lines and lines about no host), at most
+    ``limit`` of them, and whether more are already there. Costs what it reads, not the log before ``after``.
+    Safe to call while the file is being written; blocking file I/O, so call it off the event loop."""
+    opened = _open_at(path, after)
+    if opened is None:
+        return [], False
+    f, _pos = opened
+    lines: list[LogLine] = []
+    with f:
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break  # a line still being written
+            item = json.loads(raw)
+            if item["seq"] <= after or (host is not None and item.get("host") not in (None, host)):
+                continue
+            if limit is not None and len(lines) >= limit:
+                return lines, True
+            lines.append(_line(item))
+    return lines, False
 
 
 def size_text(n: int) -> str:
@@ -100,43 +186,38 @@ class RunLog:
     @staticmethod
     def read(path: Path, after: int = 0) -> list[LogLine]:
         """Complete lines with seq > ``after``. Safe to call while the file is being written."""
-        f = open_log(path)
-        if f is None:
-            return []
-        lines: list[LogLine] = []
-        with f:
-            for raw in f:
-                if not raw.endswith(b"\n"):
-                    break  # a line still being written
-                item = json.loads(raw)
-                if item["seq"] > after:
-                    lines.append(LogLine(item["seq"], item["text"], item["kind"], item.get("host")))
-        return lines
+        return read_page(path, after)[0]
 
 
 class LogTail:
-    """Reads a growing log incrementally from a byte offset, so following a long Run stays cheap."""
+    """Reads a growing log incrementally, so following a long Run stays cheap: the first read starts at
+    ``after`` (found without reading the log before it), each later one where the last stopped, at most
+    ``max_lines`` lines at a time. Blocking file I/O: call ``read`` off the event loop."""
 
-    def __init__(self, path: Path, after: int = 0) -> None:
+    def __init__(self, path: Path, after: int = 0, max_lines: int | None = None) -> None:
         self.path = path
         self.after = after
-        self._offset = 0
+        self.max_lines = max_lines
+        self._offset: int | None = None  # plain-log offset (the same in the plain and the gzipped log)
 
     def read(self) -> list[LogLine]:
-        f = open_log(self.path)  # offsets are the same in the plain and the gzipped log
-        if f is None:
+        opened = _open_at(self.path, self.after, self._offset)
+        if opened is None:
             return []
+        f, pos = opened
         lines: list[LogLine] = []
         with f:
-            f.seek(self._offset)
             for raw in f:
                 if not raw.endswith(b"\n"):
                     break  # a line still being written; read it whole next time
-                self._offset += len(raw)
+                pos += len(raw)
                 item = json.loads(raw)
                 if item["seq"] > self.after:
                     self.after = item["seq"]
-                    lines.append(LogLine(item["seq"], item["text"], item["kind"], item.get("host")))
+                    lines.append(_line(item))
+                    if self.max_lines is not None and len(lines) >= self.max_lines:
+                        break
+        self._offset = pos
         return lines
 
 
