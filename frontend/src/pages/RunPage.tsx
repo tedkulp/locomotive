@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate, useParams } from "react-router";
 
 import { CheckoutBadge, ModeBadge, SourceBadge, StatusBadge } from "@/components/RunBadges";
 import { Button } from "@/components/ui/button";
+import { useFollowBottom } from "@/hooks/useFollowBottom";
 import { useNow, usePolling } from "@/hooks/usePolling";
 import { useRunLog } from "@/hooks/useRunLog";
 import { api, isFinished, type CellStatus, type Grid, type LogLine, type Recap, type Run, type WorkingCopyDiff } from "@/lib/api";
@@ -279,18 +280,12 @@ function TaskGrid({
   onHost: (host: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [follow, setFollow] = useState(true);
-  useEffect(() => {
-    if (live && follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [grid.tasks.length, live, follow]);
+  const { onScroll } = useFollowBottom(ref, grid.tasks.length, live);
 
   return (
     <div
       ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 20);
-      }}
+      onScroll={onScroll}
       className="overflow-auto max-h-[45%] border-b border-border bg-card"
     >
       <table className="text-xs border-separate border-spacing-0">
@@ -433,11 +428,8 @@ function LogView({
   onClear: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [follow, setFollow] = useState(true);
   const shown = hostFilter ? lines.filter((line) => !line.host || line.host === hostFilter) : lines;
-  useEffect(() => {
-    if (follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [shown.length, follow]);
+  const { follow, onScroll, resume } = useFollowBottom(ref, `${hostFilter ?? ""}:${shown.length}`);
   return (
     <div className="relative min-h-0">
       {hostFilter && (
@@ -450,10 +442,7 @@ function LogView({
       )}
       <div
         ref={ref}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 20);
-        }}
+        onScroll={onScroll}
         className="h-full overflow-auto font-mono text-[12px] leading-5 p-3 bg-card"
       >
         {shown.map((line) => (
@@ -466,7 +455,7 @@ function LogView({
       {!follow && (
         <button
           type="button"
-          onClick={() => setFollow(true)}
+          onClick={resume}
           className="absolute bottom-3 right-5 text-xs rounded-full bg-primary text-primary-foreground px-3 py-1 shadow"
         >
           ↓ follow
