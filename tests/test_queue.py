@@ -336,7 +336,7 @@ def test_a_working_copy_run_prepares_its_toolchain_again_if_mise_toml_changed_wh
     working = launch(client, "alpha", checkout="working_copy")
     assert wait_waiting(client, working)["ansible_core_version"] == "2.22.0"
 
-    # While it waits, Ted bumps ansible-core and the collections in the Working Copy.
+    # While it waits, the user bumps ansible-core and the collections in the Working Copy.
     requirements = "---\ncollections:\n  - name: community.docker\n"
     working_copy.write({
         "mise.toml": '[tools]\n"pipx:ansible-core" = "2.23.1"\n',

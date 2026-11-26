@@ -1,4 +1,4 @@
-# Generic compose file; the deploy role supplies every deployment value through .env / env_file.
+# Generic compose file; every deployment value comes from .env / env_file.
 services:
   locomotive:
     build: .

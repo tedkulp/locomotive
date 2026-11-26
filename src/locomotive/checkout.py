@@ -21,7 +21,7 @@ BRANCH_NAME = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$")
 
 
 class CheckoutError(Exception):
-    """A git operation failed; the message is fit to show to Ted."""
+    """A git operation failed; the message is fit to show to the user."""
 
 
 class UnknownBranch(CheckoutError):

@@ -43,7 +43,7 @@ export function LaunchPage() {
   // Set while the server is still preparing the Ansible runtime for the preview (we keep asking).
   const [previewPreparing, setPreviewPreparing] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  // Remembered across page changes and reloads: the checkout choice is what Ted flips most while developing.
+  // Remembered across page changes and reloads: the checkout choice is what gets flipped most while developing.
   const [fromWorkingCopy, setFromWorkingCopy] = useRememberedState("launch.fromWorkingCopy", false);
   const [branch, setBranch] = useRememberedState<string | null>("launch.branch", null);
   const [branches, setBranches] = useState<{ default: string; branches: string[] } | null>(null);
@@ -430,7 +430,7 @@ function CheckoutBanner({
   );
 }
 
-/** The Working Copy's branch, dirty state and ahead/behind its upstream (as Ted last fetched it). */
+/** The Working Copy's branch, dirty state and ahead/behind its upstream (as last fetched there). */
 function WorkingCopyState({ wc }: { wc: WorkingCopyStatus | null }) {
   if (!wc) return null;
   if (!wc.available)

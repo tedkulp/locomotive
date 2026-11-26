@@ -3,6 +3,8 @@ name = "locomotive"
 version = "0.1.0"
 description = "A small web app plus MCP server that runs Ansible Playbooks from one repo"
 requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",

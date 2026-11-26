@@ -1,138 +1,118 @@
 # locomotive
 
-A small web app plus MCP server that runs Ansible Playbooks from one repo: preview, launch, queue, schedule, and keep history of Runs.
+A self-hosted web app and MCP server for running the Ansible Playbooks in one Git repo: preview, launch,
+queue, schedule, and keep a history of every Run.
 
-Status: under construction (launch form with host/task previews; clean Runs of any remote branch or Working Copy Runs in place, check or real, with their log; per-host queue; Schedules with the Scheduler Ping; MCP server; log retention and housekeeping).
+It replaces a general-purpose Ansible UI with something small and opinionated: one repo, one process, one
+SQLite database, and no login page (it sits behind a reverse proxy that supplies the user's identity).
 
-## Layout
+## Features
 
-- `src/locomotive/`: FastAPI app (one process: API, Run supervisor), SQLite via SQLAlchemy + Alembic
-- `frontend/`: React + Vite + shadcn/ui, built to static files the backend serves
-- `tests/`: seam 1 harness (app in-process over real HTTP, stub toolchain, local bare git remote, fake clock, fake HTTP server)
+- **Launch form** with live previews of the hosts and tasks a Run will touch, before it starts
+- **Clean Runs** of any remote branch, or **Working Copy Runs** in place, uncommitted changes and all
+- **Per-host queue**: two Runs never touch the same host at once
+- **Run page** with a task × host grid, recap, live log, Stop and Kill
+- **Schedules** (cron) with a Scheduler Ping to a healthchecks URL
+- **ntfy notifications** for failed, interrupted, missed and changed Runs
+- **MCP server** at `/mcp`, so Claude Code and other agents can preview and start Runs
+- **Log retention**: per-Run log cap, gzip, and daily pruning under a disk budget
+
+Every Run's history row is kept forever. Not supported: multiple repos, users with different permissions,
+and logging in without a reverse proxy.
+
+## What your Ansible repo needs
+
+locomotive runs Playbooks from the repo at `LOCOMOTIVE_REPO_URL`. That repo needs:
+
+- `playbooks/*.yml`: each top-level file is a Playbook locomotive offers to run
+  (hide some with `LOCOMOTIVE_HIDDEN_PLAYBOOKS`)
+- `mise.toml` pinning the Ansible toolchain, including `ansible-runner`: locomotive runs
+  `mise install` and `mise exec` against it for every Run
+- Its inventory set by the repo's own Ansible config (locomotive passes no `-i`)
+- Optionally `collections/requirements.yml`, installed into a cache per Run
+
+## Quick start (Docker)
+
+Requires Docker with Compose.
+
+```sh
+cp .env.example .env   # set LOCOMOTIVE_REPO_URL and the three access-guard values
+docker compose up --build
+```
+
+The app listens on `127.0.0.1:8000` (change with `LOCOMOTIVE_BIND` / `LOCOMOTIVE_HOST_PORT`) and keeps
+its data in `./data` (`LOCOMOTIVE_DATA_PATH`). Put it behind a reverse proxy that sets the identity header.
+
+## Configuration
+
+All settings are env vars prefixed `LOCOMOTIVE_`. `.env.example` lists them, and
+`src/locomotive/settings.py` is the full source.
+
+| Variable | Purpose |
+| --- | --- |
+| `REPO_URL` (required) | The Ansible repo to run Playbooks from. Add `REPO_USERNAME` / `REPO_TOKEN` for a private repo |
+| `DATA_DIR` (required outside Docker) | Database, mirror, Run dirs, logs and caches |
+| `TRUSTED_PROXY_IPS`, `IDENTITY_HEADER`, `ALLOWLIST` | Access guard: which peers may connect and which identities get in. Unset fails closed |
+| `DEFAULT_BRANCH` | Branch for clean Runs and Schedules (default `main`) |
+| `WORKING_COPY_PATH` | A clone to allow Working Copy Runs in |
+| `MCP_TOKENS`, `PUBLIC_HOSTNAME` | MCP clients' hashed bearer tokens, and the hostname they use |
+| `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` | Notifications (off unless URL and topic are set) |
+| `HEALTHCHECKS_URL` | Where the Scheduler Ping goes |
+| `TIME_ZONE` | IANA zone for cron and housekeeping (unset: `TZ`, then `/etc/localtime`, then UTC) |
+| `LOG_CAP_BYTES`, `LOG_BUDGET_BYTES` | Per-Run log cap (200 MB) and budget for all logs (10 GB) |
+
+## Connecting an MCP client
+
+1. Make a token: `TOKEN=$(openssl rand -hex 32)`
+2. Hash it: `printf %s "$TOKEN" | sha256sum`
+3. Add `LOCOMOTIVE_MCP_TOKENS=<name>=<sha256>` (comma-separate several) and restart
+4. Register it:
+
+   ```sh
+   claude mcp add --transport http locomotive https://<public hostname>/mcp --header "Authorization: Bearer $TOKEN"
+   ```
+
+`start_run` uses check mode unless called with `confirm: true`. See [docs/behaviour.md](docs/behaviour.md#mcp)
+for the tool list.
 
 ## Development
 
-Toolchain versions are pinned in `mise.toml` (`mise install`).
+Requires [mise](https://mise.jdx.dev) (pins Python 3.13, uv, Node 22 and pnpm in `mise.toml`).
 
 ```sh
-uv sync                      # backend deps
-uv run pytest                # backend test suite
+mise install
+uv sync                        # backend deps
+uv run pytest                  # backend tests
 cd frontend && pnpm install
-pnpm typecheck && pnpm build # frontend checks + build to frontend/dist
+pnpm typecheck && pnpm build   # frontend checks, built to frontend/dist
 ```
 
-Run locally (settings are env vars prefixed `LOCOMOTIVE_`, see `.env.example` and `src/locomotive/settings.py`):
+Run it locally. The access guard needs a trusted peer and an identity, so have your browser (e.g. a header
+extension) send `X-User: me`:
 
 ```sh
-LOCOMOTIVE_DATA_DIR=./data LOCOMOTIVE_REPO_URL=<repo url> \
-LOCOMOTIVE_STATIC_DIR=frontend/dist uv run python -m locomotive
-cd frontend && pnpm dev      # optional: Vite dev server proxying /api to :8000
+LOCOMOTIVE_DATA_DIR=./data LOCOMOTIVE_REPO_URL=<repo url> LOCOMOTIVE_STATIC_DIR=frontend/dist \
+LOCOMOTIVE_TRUSTED_PROXY_IPS=127.0.0.1 LOCOMOTIVE_IDENTITY_HEADER=X-User LOCOMOTIVE_ALLOWLIST=me \
+uv run python -m locomotive    # serves http://127.0.0.1:8000
+cd frontend && pnpm dev        # optional: Vite dev server proxying /api to :8000
 ```
 
-Access guard: locomotive has no login page. It accepts connections only from
-`LOCOMOTIVE_TRUSTED_PROXY_IPS` (the reverse proxy; addresses or CIDRs) and takes the user from
-`LOCOMOTIVE_IDENTITY_HEADER`, which must be on `LOCOMOTIVE_ALLOWLIST`. Missing identity is a plain
-401, an unlisted one 403; any other peer gets 403. `/mcp` ignores identity headers. Unset values fail
-closed, so for local use set e.g. `LOCOMOTIVE_TRUSTED_PROXY_IPS=127.0.0.1
-LOCOMOTIVE_IDENTITY_HEADER=X-User LOCOMOTIVE_ALLOWLIST=me` and have your browser (e.g. a header
-extension) send `X-User: me`.
+### Layout
 
-Each Run exports the resolved commit, runs `mise install` against that checkout's `mise.toml`, installs
-`collections/requirements.yml` into a cache keyed by its sha256, resolves its exact host set, then runs
-`ansible-runner` (which must be provided by the checkout's mise toolchain) with the launch options.
+- `src/locomotive/`: FastAPI app (one process: API, Run supervisor, scheduler), SQLite via SQLAlchemy + Alembic
+- `frontend/`: React + Vite + shadcn/ui, built to static files the backend serves
+- `tests/`: the seam 1 harness (app in-process over real HTTP, stub toolchain, local bare git remote, fake
+  clock, fake HTTP server) and seam 2, `tests/test_smoke_real_ansible.py`: the real preview helper and one real
+  `ansible-runner` Run against `localhost`. Seam 2 needs `mise` on PATH (skipped otherwise) and installs its
+  Ansible runtime on first use.
 
-Per-host queue: two Runs never touch the same host at once (whatever started them, check mode included).
-A Run is `queued` from launch until it holds its hosts: it fetches and fixes its SHA (a failed fetch fails
-it at once), resolves its exact host set, then starts when no running Run holds one of its hosts and no
-earlier-launched queued Run shares one (so no Run is starved). Meanwhile its `stage` is `preparing`
-(fetching, installing, resolving hosts) or `waiting` (for hosts, shown in `waiting_for`), and null once it
-leaves the queue; `POST /api/runs/{id}/cancel` takes it out of the queue. Queued Runs survive a restart with
-the SHA and host set they were queued with. A Working Copy Run re-resolves its hosts as it starts (first
-preparing its toolchain again if its `mise.toml` or `collections/requirements.yml` changed while it was
-queued) and waits again on a new overlap.
+## More
 
-Working Copy Runs (`checkout: "working_copy"`, needs `LOCOMOTIVE_WORKING_COPY_PATH`) run in place in that
-clone, dirty files and all, with its own `mise.toml`. Each records HEAD, a dirty flag, `git diff HEAD` (capped at
-1 MB, `GET /api/runs/<id>/working-copy-diff`) and the untracked files. locomotive only reads the Working Copy
-(without git's optional locks) and runs in it: it never commits, pulls, fetches or pushes it, so the
-ahead/behind shown by `GET /api/working-copy` is against its upstream as last fetched there. In Docker, mount the
-clone at the same path inside the container, read-write. Clean Runs take a `branch` (default
-`LOCOMOTIVE_DEFAULT_BRANCH`; `GET /api/branches` lists the remote's).
+- [docs/behaviour.md](docs/behaviour.md): the detailed rules for the queue, Working Copy, previews,
+  Schedules, notifications, log retention and MCP
+- [GLOSSARY.md](GLOSSARY.md): what Run, Playbook, Working Copy, Schedule and Scheduler Ping mean here
+- Issues: GitHub Issues on this repo
 
-History: `GET /api/runs?limit=<n>&before=<id>` pages newest first (`next_before` is the next page's cursor);
-the History page loads older pages on demand and shows the reason of each skipped, missed, interrupted,
-failed or canceled entry.
+## License
 
-Schedules (`/api/schedules`, the Schedules page): saved Run settings (Playbook, limit, tags, check/diff,
-verbosity, extra vars, branch; empty branch = the default branch) with a five-field cron expression read in
-`LOCOMOTIVE_TIME_ZONE` (unset: `TZ`, then `/etc/localtime`, then UTC). The scheduler loop (every
-`LOCOMOTIVE_SCHEDULER_INTERVAL_SECONDS`, default 30) looks at cron firings after each Schedule's
-`last_fired_at`; each firing gives one Run with source `schedule`, labelled with its Schedule, always a
-clean export (never the Working Copy). If that Schedule's previous Run is still queued or running, the firing
-leaves a `skipped` history entry with the reason instead. Firings missed while locomotive was down collapse
-into one Run if the newest is at most 1h old, otherwise one `missed` entry is recorded (no Run). DST: a
-skipped wall-clock time doesn't fire; a repeated one fires once (its first occurrence). Disabling a
-Schedule or pausing all of them (`PUT /api/scheduler {"paused": true}`, shown as a banner) drops firings
-with no record; re-enabling or resuming doesn't catch up. The loop also sends the Scheduler Ping (GET
-`LOCOMOTIVE_HEALTHCHECKS_URL`) every 5 minutes, retrying a failed one on the next tick.
-
-Notifications go straight to ntfy (`LOCOMOTIVE_NTFY_URL`, `_TOPIC`, `_TOKEN`; unset URL or topic = off), one
-message per notable Run: failed or interrupted (any source) and missed Schedule firings at priority 4, and a
-scheduled Run that changed hosts at priority 3 when its Schedule's notify-on-changes is on. Successful
-hand-started and MCP Runs, canceled Runs and skipped firings stay silent. Titles: `<Playbook> failed` /
-`<Playbook> interrupted` / `<Playbook>: changes on N hosts` / `<Schedule> missed`. The body has the source,
-check mode, short SHA (or "working copy"), duration, failed/unreachable/changed hosts with counts and the first
-failed task, never log lines; it clicks through to `LOCOMOTIVE_PUBLIC_URL/runs/<id>` (default `https://LOCOMOTIVE_PUBLIC_HOSTNAME`). A failed
-delivery is retried 3 times (backoff `LOCOMOTIVE_NTFY_RETRY_SECONDS`, doubling), then recorded on the Run
-(`notification` in `GET /api/runs/<id>`, shown on the Run page); the Run's own outcome never changes.
-
-Log retention: every Run's history row is kept forever; its log and task grid (`<data dir>/history/<id>/`)
-are not. A Run's log stops at `LOCOMOTIVE_LOG_CAP_BYTES` (default 200 MB): the Run carries on with a complete
-grid and recap and is marked "log truncated". The cap bounds the Run's disk use: ansible-runner writes no stdout
-file, each of its event files is deleted once folded into the log and grid, and its own output is capped. A finished Run's files are
-gzip-compressed (the log in indexed ~1 MB members, so `GET /api/runs/<id>/log?after=<seq>&limit=<n>` and the
-SSE stream seek to their cursor instead of reading the whole log). Housekeeping (not a Schedule) runs at startup and daily at 04:00 in `LOCOMOTIVE_TIME_ZONE`:
-it prunes the logs of quiet scheduled Runs (no changes, no failures) after 14 days and of all other Runs after
-90 days, then, while all Run logs exceed `LOCOMOTIVE_LOG_BUDGET_BYTES` (default 10 GB), the oldest un-Kept
-ones. A Run with Keep set (`PUT /api/runs/<id>/keep`, the Run page's Keep box) is never pruned; if Kept logs
-alone exceed the budget nothing is pruned for it and one ntfy warning (priority 3, "Kept logs exceed budget")
-goes out until the overflow clears. New Runs are never refused. A pruned Run keeps its summary and recap and
-shows "log pruned on <date>" (`log_pruned_at`; its `/log` and `/grid` answer 410, MCP `tail_run_output` a
-`log_pruned` error). Each pass and what it pruned is listed on the Status page (`GET /api/housekeeping`).
-
-Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
-with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names
-only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventory` is never used.
-The first preview of a commit or Working Copy prepares its Ansible runtime (`mise install`, collections),
-which can outlast the preview time limit: the preparation carries on in the background and the preview
-answers `503` with `Retry-After: 2` until it is ready (the launch form keeps asking and says so).
-
-`uv run pytest` includes seam 2 (`tests/test_smoke_real_ansible.py`): the real helper and one real
-`ansible-runner` Run against `localhost`, with the ansible-core pinned there. It needs `mise` on PATH
-(skipped otherwise) and installs that runtime on first use.
-
-MCP: `/mcp` is an MCP server (official `mcp` SDK, streamable HTTP) for Claude Code and other clients
-that can send a header. Each client gets a static bearer token; locomotive stores only its sha256, as
-`LOCOMOTIVE_MCP_TOKENS=lxc=<sha256>,mac=<sha256>` (make one with `openssl rand -hex 32`, hash it with
-`printf %s "$TOKEN" | sha256sum`). A missing or unknown token is a 401 (no OAuth), and a Run a token
-starts shows `mcp:<name>` as its source. `LOCOMOTIVE_PUBLIC_HOSTNAME` is the hostname clients use: MCP's
-DNS-rebinding check accepts it (and localhost) in `Host`/`Origin` and answers 421 to anything else.
-Tools: `list_playbooks`, `list_branches`, `working_copy_status`, `list_schedules`, `get_inventory`,
-`list_tags`, `preview_hosts`, `preview_tasks`, `list_runs`, `get_run`, `start_run` (check by default; a
-real Run needs `confirm: true`; `source: clean | working_copy`, `branch`; returns the queued or running
-Run at once), `tail_run_output(run_id, cursor)` and `wait_for_run(run_id, max_seconds <= 30)`. Each
-tool adapts the HTTP API in-process, so it validates and fails exactly as the UI does (an argument a
-tool doesn't define fails the call, never dropped), and answers
-within `LOCOMOTIVE_MCP_TOOL_BUDGET_SECONDS` (default 9) except `wait_for_run`, which takes what it is asked for
-(default 8s).
-
-```sh
-claude mcp add --transport http locomotive https://<public hostname>/mcp --header "Authorization: Bearer $TOKEN"
-```
-
-## Docker
-
-```sh
-cp .env.example .env   # fill in
-docker compose up --build
-```
+[MIT](LICENSE)

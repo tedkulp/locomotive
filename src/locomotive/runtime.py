@@ -33,7 +33,7 @@ OnProc = Callable[[asyncio.subprocess.Process], None]
 
 
 class ToolchainError(Exception):
-    """A runtime step failed; the message is fit to show to Ted (and is a Run's failure reason)."""
+    """A runtime step failed; the message is fit to show to the user (and is a Run's failure reason)."""
 
 
 class PreviewTimeout(ToolchainError):

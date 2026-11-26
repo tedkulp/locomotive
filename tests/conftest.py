@@ -175,7 +175,7 @@ def remote(tmp_path: Path) -> Remote:
 
 @dataclass
 class WorkingCopy:
-    """A temp clone of the remote standing in for Ted's Working Copy (never the real one)."""
+    """A temp clone of the remote standing in for the user's Working Copy (never the real one)."""
 
     path: Path
 
