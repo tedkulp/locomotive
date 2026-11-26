@@ -30,7 +30,7 @@ export function RunPage() {
   // The latest click on a task name, for the log to scroll to.
   const [jump, setJump] = useState<LogJump | null>(null);
   useEffect(() => setJump(null), [runId]);
-  const jumpTo = (seq: number) => setJump((current) => ({ seq, n: (current?.n ?? 0) + 1 }));
+  const jumpTo = (seq: number) => setJump((current) => ({ seq, click: (current?.click ?? 0) + 1 }));
   const lastSeq = lines.length ? lines[lines.length - 1].seq : 0;
 
   if (error && !run) return <div className="p-10 text-destructive">{error}</div>;
@@ -93,8 +93,7 @@ export function RunPage() {
         <TaskGrid
           grid={grid}
           live={live}
-          logTruncated={run.log_truncated}
-          lastSeq={lastSeq}
+          linkBlocker={(task) => logLinkBlocker(task, lastSeq, live, run.log_truncated)}
           hostFilter={hostFilter}
           onHost={toggleHost}
           onTask={jumpTo}
@@ -288,7 +287,7 @@ function WorkingCopyChanges({ run }: { run: Run }) {
 }
 
 /** Why a task name can't be clicked through to the log, or null if it can. */
-function notInLog(task: GridTask, lastSeq: number, live: boolean, logTruncated: boolean): string | null {
+function logLinkBlocker(task: GridTask, lastSeq: number, live: boolean, logTruncated: boolean): string | null {
   if (task.log_seq != null) return task.log_seq <= lastSeq ? null : "Not in the log yet: still loading";
   if (logTruncated) return "Not in the log: log truncated";
   if (live) return "Not in the log yet";
@@ -298,16 +297,15 @@ function notInLog(task: GridTask, lastSeq: number, live: boolean, logTruncated: 
 function TaskGrid({
   grid,
   live,
-  logTruncated,
-  lastSeq,
+  linkBlocker,
   hostFilter,
   onHost,
   onTask,
 }: {
   grid: Grid;
   live: boolean;
-  logTruncated: boolean;
-  lastSeq: number;
+  /** Why a task can't be clicked through to the log, or null if it can. */
+  linkBlocker: (task: GridTask) => string | null;
   hostFilter: string | null;
   onHost: (host: string) => void;
   onTask: (seq: number) => void;
@@ -345,8 +343,9 @@ function TaskGrid({
           {grid.tasks.map((task, i) => {
             const newPlay = task.play && task.play !== grid.tasks[i - 1]?.play;
             const running = Object.values(task.results).includes("running");
-            const why = notInLog(task, lastSeq, live, logTruncated);
-            const from = task.included_from ? `from ${task.included_from}` : null;
+            const blocker = linkBlocker(task);
+            const linkSeq = blocker === null ? task.log_seq : null;
+            const includedFrom = task.included_from ? `from ${task.included_from}` : null;
             return (
               <Fragment key={task.id}>
                 {newPlay && (
@@ -361,16 +360,16 @@ function TaskGrid({
                 )}
                 <tr className={cn(running && "bg-sky-50")}>
                   <td
-                    title={[from, why ?? "Show this task in the log"].filter(Boolean).join(" · ")}
+                    title={[includedFrom, blocker ?? "Show this task in the log"].filter(Boolean).join(" · ")}
                     className={cn(
                       "px-3 py-0.5 font-mono truncate max-w-[360px]",
                       task.included_from && "pl-7 text-fuchsia-800",
                     )}
                   >
-                    {why === null && task.log_seq != null ? (
+                    {linkSeq != null ? (
                       <button
                         type="button"
-                        onClick={() => onTask(task.log_seq!)}
+                        onClick={() => onTask(linkSeq)}
                         className="max-w-full truncate text-left hover:underline cursor-pointer"
                       >
                         {task.name}
@@ -462,10 +461,11 @@ function RecapPanel({
   );
 }
 
-/** A click on a task name: scroll the log to line `seq`. `n` counts clicks, so the same task jumps again. */
-type LogJump = { seq: number; n: number };
+/** A click on a task name: scroll the log to line `seq`. `click` counts clicks, so the same task jumps again. */
+type LogJump = { seq: number; click: number };
 
 const HIGHLIGHT_MS = 2000;
+const HIGHLIGHT_FADE_MS = 500;
 
 /** Keyboard focus on a scroll pane (focusable so arrow/page keys scroll it and reach useFollowBottom). */
 const SCROLL_FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40";
@@ -486,7 +486,8 @@ function LogView({
   const ref = useRef<HTMLDivElement>(null);
   const shown = hostFilter ? lines.filter((line) => !line.host || line.host === hostFilter) : lines;
   const { follow, onScroll, resume, jumpTo } = useFollowBottom(ref, `${hostFilter ?? ""}:${shown.length}`);
-  const [highlight, setHighlight] = useState<number | null>(null);
+  // The jumped-to line: lit, then fading back (it keeps its transition until the fade is over).
+  const [highlight, setHighlight] = useState<{ seq: number; lit: boolean } | null>(null);
 
   // Only a new click jumps (not new lines or a filter change): put the banner mid-log, follow off, and flash it.
   // The banner names no host, so it is shown under any host filter.
@@ -497,9 +498,13 @@ function LogView({
     if (!target) return;
     const offset = target.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
     jumpTo(Math.max(0, offset - el.clientHeight / 2 + target.offsetHeight / 2));
-    setHighlight(jump.seq);
-    const timer = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
-    return () => window.clearTimeout(timer);
+    setHighlight({ seq: jump.seq, lit: true });
+    const fade = window.setTimeout(() => setHighlight({ seq: jump.seq, lit: false }), HIGHLIGHT_MS);
+    const clear = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS + HIGHLIGHT_FADE_MS);
+    return () => {
+      window.clearTimeout(fade);
+      window.clearTimeout(clear);
+    };
   }, [jump, jumpTo]);
   return (
     <div className="relative min-h-0">
@@ -522,9 +527,10 @@ function LogView({
             key={line.seq}
             data-seq={line.seq}
             className={cn(
-              "whitespace-pre-wrap transition-colors duration-500",
+              "whitespace-pre-wrap",
               lineTone(line),
-              highlight === line.seq && "bg-yellow-200",
+              highlight?.seq === line.seq && "transition-colors duration-500",
+              highlight?.seq === line.seq && highlight.lit && "bg-yellow-200",
             )}
           >
             {line.text || " "}
