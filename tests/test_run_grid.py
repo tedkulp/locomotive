@@ -206,3 +206,60 @@ def test_the_stream_carries_grid_updates_and_log_hosts(client, stubs):
     logs = [json.loads(d) for e, _, d in rest if e == "log"]
     assert next(line for line in logs if line["text"] == "ok: [beta]")["host"] == "beta"
     assert rest[-1][0] == "end"
+
+
+# --------------------------------------------------------------------------- jumping from a task to its log
+
+
+def banner_of(lines, seq):
+    return next(line["text"] for line in lines if line["seq"] == seq)
+
+
+def test_each_task_row_carries_the_seq_of_its_banner_in_the_log(client, stubs):
+    stubs.script(runner={"events": [
+        {"event": "playbook_on_play_start", "stdout": "\nPLAY [web] *****", "event_data": {"play": "web"}},
+        task("Gathering Facts", "t1", play="web"),
+        result("runner_on_ok", "alpha", "t1"),
+        task("Restart", "t2", play="web"),
+        changed("alpha", "t2"),
+        {"event": "playbook_on_play_start", "stdout": "\nPLAY [db] *****", "event_data": {"play": "db"}},
+        task("Gathering Facts", "t3", play="db"),
+        result("runner_on_ok", "beta", "t3"),
+        task("Restart", "t4", play="db"),
+        changed("beta", "t4"),
+        stats(alpha=(2, 1, 0, 0, 0), beta=(2, 1, 0, 0, 0)),
+    ]})
+    run_id = start(client)
+    wait_for_run(client, run_id)
+
+    tasks = client.get(f"/api/runs/{run_id}/grid").json()["tasks"]
+    lines = client.get(f"/api/runs/{run_id}/log").json()["lines"]
+
+    seqs = [t["log_seq"] for t in tasks]
+    assert all(isinstance(seq, int) for seq in seqs)
+    assert len(set(seqs)) == 4  # same-named tasks in different plays have their own banners
+    assert [banner_of(lines, seq) for seq in seqs] == [
+        "TASK [Gathering Facts] *****",
+        "TASK [Restart] *****",
+        "TASK [Gathering Facts] *****",
+        "TASK [Restart] *****",
+    ]
+    play_db = next(line["seq"] for line in lines if line["text"] == "PLAY [db] *****")
+    assert seqs[1] < play_db < seqs[2]  # each banner is its own play's
+
+
+def test_a_grid_saved_before_tasks_had_a_log_position_still_loads_without_one(client, stubs, data_dir):
+    stubs.script(runner={"events": MIXED, "rc": 2})
+    run_id = start(client)
+    wait_for_run(client, run_id)
+    path = data_dir / "history" / str(run_id) / "grid.json"
+    saved = json.loads(path.read_text())
+    for row in saved["tasks"]:
+        del row["log_seq"]
+    path.write_text(json.dumps(saved))
+
+    tasks = client.get(f"/api/runs/{run_id}/grid").json()["tasks"]
+
+    assert [(t["name"], t["log_seq"]) for t in tasks] == [
+        ("Gathering Facts", None), ("Install packages", None), ("Configure", None), ("Optional", None),
+    ]

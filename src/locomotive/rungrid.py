@@ -67,11 +67,20 @@ class RunGrid:
                 "name": data.get("task") or data.get("name") or "",
                 "play": data.get("play"),
                 "included_from": self._included.get(path),
+                # seq of the task's banner line in the Run log, once written; None if it never was (log cap)
+                "log_seq": None,
                 "results": {},
             }
             self._by_uuid[uuid] = row
             self.tasks.append(row)
         return row
+
+    def set_log_seq(self, uuid: str | None, seq: int) -> None:
+        """Link a task row to its banner line in the Run log: the first banner wins (a handler can run again)."""
+        row = self._by_uuid.get(uuid or "")
+        if row is not None and row.get("log_seq") is None:
+            row["log_seq"] = seq
+            self.version += 1
 
     def _cell(self, data: dict[str, Any], status: str) -> None:
         host = data.get("host")
@@ -166,6 +175,8 @@ class RunGrid:
         grid.version = data.get("version", 0)
         grid.hosts = data.get("hosts", [])
         grid.tasks = data.get("tasks", [])
+        for row in grid.tasks:
+            row.setdefault("log_seq", None)  # saved before task rows linked to the log
         grid._by_uuid = {row["id"]: row for row in grid.tasks}
         grid.counts = data.get("counts", {})
         grid.stats = data.get("stats")

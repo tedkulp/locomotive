@@ -25,7 +25,7 @@ from locomotive.clock import Clock
 from locomotive.launch import LaunchOptions
 from locomotive.models import ACTIVE_STATUSES, CheckoutKind, Run, RunStatus
 from locomotive.notifier import Notifier
-from locomotive.rungrid import RunGrid
+from locomotive.rungrid import STOP_EVENTS, RunGrid
 from locomotive.runlog import RunLog
 from locomotive.runtime import (
     REQUIREMENTS,
@@ -677,8 +677,13 @@ class EventFollower:
                     self._grid.stop_skipped.update(self._stop_done.read_text().split())
             self._grid.apply(event)
             if event.get("stdout"):
-                host = (event.get("event_data") or {}).get("host")
-                self._log.append(event["stdout"], kind="ansible", host=host)
+                data = event.get("event_data") or {}
+                written = self._log.append(event["stdout"], kind="ansible", host=data.get("host"))
+                if event.get("event") in STOP_EVENTS:
+                    # The banner is the event's first non-blank line ("TASK [...]", "RUNNING HANDLER [...]").
+                    banner = next((line for line in written if line.text.strip()), None)
+                    if banner is not None:
+                        self._grid.set_log_seq(data.get("task_uuid"), banner.seq)
             if self._consume:
                 pending[counter].unlink(missing_ok=True)
 
