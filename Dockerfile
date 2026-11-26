@@ -47,7 +47,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
     MISE_PIPX_UVX=true \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /var/lib/locomotive/home && chown -R 1000:1000 /var/lib/locomotive
+# A passwd entry for uid 1000: OpenSSH refuses to run without one ("No user exists for uid 1000").
+RUN groupadd --gid 1000 locomotive \
+ && useradd --uid 1000 --gid 1000 --home-dir /var/lib/locomotive/home --no-create-home --shell /bin/sh locomotive \
+ && mkdir -p /var/lib/locomotive/home && chown -R 1000:1000 /var/lib/locomotive
 USER 1000:1000
 VOLUME /var/lib/locomotive
 EXPOSE 8000
