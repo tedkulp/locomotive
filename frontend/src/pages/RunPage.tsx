@@ -27,8 +27,8 @@ export function RunPage() {
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const toggleHost = (host: string) => setHostFilter((current) => (current === host ? null : host));
   useEffect(() => setHostFilter(null), [runId]);
-  // A click on a task name: scroll the log to that seq. `n` makes clicking the same task again jump again.
-  const [jump, setJump] = useState<{ seq: number; n: number } | null>(null);
+  // The latest click on a task name, for the log to scroll to.
+  const [jump, setJump] = useState<LogJump | null>(null);
   useEffect(() => setJump(null), [runId]);
   const jumpTo = (seq: number) => setJump((current) => ({ seq, n: (current?.n ?? 0) + 1 }));
   const lastSeq = lines.length ? lines[lines.length - 1].seq : 0;
@@ -461,6 +461,9 @@ function RecapPanel({
   );
 }
 
+/** A click on a task name: scroll the log to line `seq`. `n` counts clicks, so the same task jumps again. */
+type LogJump = { seq: number; n: number };
+
 const HIGHLIGHT_MS = 2000;
 
 function LogView({
@@ -474,7 +477,7 @@ function LogView({
   live: boolean;
   hostFilter: string | null;
   onClear: () => void;
-  jump: { seq: number; n: number } | null;
+  jump: LogJump | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const shown = hostFilter ? lines.filter((line) => !line.host || line.host === hostFilter) : lines;

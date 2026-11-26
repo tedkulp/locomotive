@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from locomotive.runlog import LogLine
+
 RECAP_KEYS = ("ok", "changed", "skipped", "failed", "unreachable")
 # playbook_on_stats key -> recap key
 STATS_KEYS = {"ok": "ok", "changed": "changed", "skipped": "skipped", "failures": "failed", "dark": "unreachable"}
@@ -75,11 +77,16 @@ class RunGrid:
             self.tasks.append(row)
         return row
 
-    def set_log_seq(self, uuid: str | None, seq: int) -> None:
-        """Link a task row to its banner line in the Run log: the first banner wins (a handler can run again)."""
-        row = self._by_uuid.get(uuid or "")
-        if row is not None and row.get("log_seq") is None:
-            row["log_seq"] = seq
+    def link_log(self, event: dict[str, Any], written: list[LogLine]) -> None:
+        """Given the log lines an event's output became, link a task-start event's row to its banner line:
+        the first non-blank one ("TASK [...]", "RUNNING HANDLER [...]"). None written (past the log cap) leaves
+        the row unlinked; the first banner wins (a handler can run again)."""
+        if event.get("event") not in STOP_EVENTS:
+            return
+        row = self._by_uuid.get((event.get("event_data") or {}).get("task_uuid") or "")
+        banner = next((line for line in written if line.text.strip()), None)
+        if row is not None and banner is not None and row.get("log_seq") is None:
+            row["log_seq"] = banner.seq
             self.version += 1
 
     def _cell(self, data: dict[str, Any], status: str) -> None:
