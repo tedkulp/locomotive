@@ -1,5 +1,13 @@
-## Issue tracker
+## Agent skills
 
-The spec and tickets for this app live in the ansible repo's Forgejo tracker (spec: tedkulp/ansible#18, tickets #19-#28), managed with the `fj` CLI. The host and commands are in that repo's `docs/agents/issue-tracker.md`.
+### Issue tracker
 
-Domain vocabulary (Controller, Playbook, Run, Working Copy, Schedule, Scheduler Ping, Drift) is defined in `GLOSSARY.md` of the tedkulp/ansible repo.
+Issues and specs live in GitHub Issues on tedkulp/locomotive, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
