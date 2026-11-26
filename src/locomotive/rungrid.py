@@ -22,6 +22,8 @@ RESULT_EVENTS = {
     "runner_on_ok", "runner_on_failed", "runner_on_skipped", "runner_on_unreachable",
 }
 TASK_START_EVENTS = {"playbook_on_task_start", "playbook_on_handler_task_start"}
+# How a task's banner line in the Run log starts.
+BANNER_PREFIXES = ("TASK [", "RUNNING HANDLER [")
 
 
 class RunGrid:
@@ -59,7 +61,7 @@ class RunGrid:
             self.stats = _recap_from_stats(data)
         else:
             changed = False
-        if (kind in TASK_START_EVENTS and self._link_banner(data, written)) or changed:
+        if self._link_banner(data, written) or changed:
             self.version += 1
 
     def _task(self, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -83,16 +85,18 @@ class RunGrid:
         return row
 
     def _link_banner(self, data: dict[str, Any], written: Sequence[LogLine]) -> bool:
-        """Links the event's task row to its banner line among ``written``: the first non-blank one ("TASK [...]",
-        "RUNNING HANDLER [...]"). Nothing written (past the log cap) leaves the row unlinked; the first banner
-        wins (a handler can run again). True if it linked."""
+        """Links the event's task row to its banner line ("TASK [...]", "RUNNING HANDLER [...]") if that is the
+        first non-blank line of ``written``. Usually the task-start event writes it, but with
+        ``display_skipped_hosts`` or ``display_ok_hosts`` off, Ansible's default callback defers the banner to
+        the stdout of the first result it shows, so any event for the task can carry it. Nothing written (past
+        the log cap) leaves the row unlinked; the first banner wins (a handler can run again). True if linked."""
         row = self._by_uuid.get(data.get("task_uuid") or "")
         if row is None or row.get("log_seq") is not None:
             return False
-        banner = next((line for line in written if line.text.strip()), None)
-        if banner is None:
+        first = next((line for line in written if line.text.strip()), None)
+        if first is None or not first.text.lstrip().startswith(BANNER_PREFIXES):
             return False
-        row["log_seq"] = banner.seq
+        row["log_seq"] = first.seq
         return True
 
     def _cell(self, data: dict[str, Any], status: str) -> None:

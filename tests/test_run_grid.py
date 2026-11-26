@@ -263,3 +263,27 @@ def test_a_grid_saved_before_tasks_had_a_log_position_still_loads_without_one(cl
     assert [(t["name"], t["log_seq"]) for t in tasks] == [
         ("Gathering Facts", None), ("Install packages", None), ("Configure", None), ("Optional", None),
     ]
+
+
+def test_a_banner_ansible_defers_to_a_tasks_first_shown_result_is_still_linked(client, stubs):
+    # With display_skipped_hosts / display_ok_hosts off, ansible-core's default callback prints no banner at task
+    # start: it writes "TASK [...]" ahead of the first result it does show, in that result event's stdout.
+    stubs.script(runner={"events": [
+        {"event": "playbook_on_play_start", "stdout": "\nPLAY [servers] *****", "event_data": {"play": "servers"}},
+        {**task("Quiet", "t1"), "stdout": ""},
+        {**result("runner_on_skipped", "alpha", "t1"), "stdout": ""},
+        {**result("runner_on_skipped", "beta", "t1"), "stdout": ""},
+        {**task("Loud", "t2"), "stdout": ""},
+        {**changed("beta", "t2"), "stdout": "\nTASK [Loud] *****\nchanged: [beta]"},
+        {**changed("alpha", "t2"), "stdout": "changed: [alpha]"},
+        stats(alpha=(1, 1, 1, 0, 0), beta=(1, 1, 1, 0, 0)),
+    ]})
+    run_id = start(client)
+    wait_for_run(client, run_id)
+
+    tasks = client.get(f"/api/runs/{run_id}/grid").json()["tasks"]
+    lines = client.get(f"/api/runs/{run_id}/log").json()["lines"]
+
+    quiet, loud = tasks
+    assert quiet["log_seq"] is None  # every result hidden: no banner was ever written
+    assert banner_of(lines, loud["log_seq"]) == "TASK [Loud] *****"
