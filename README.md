@@ -112,3 +112,7 @@ cd frontend && pnpm dev        # optional: Vite dev server proxying /api to :800
   Schedules, notifications, log retention and MCP
 - [GLOSSARY.md](GLOSSARY.md): what Run, Playbook, Working Copy, Schedule and Scheduler Ping mean here
 - Issues: GitHub Issues on this repo
+
+## License
+
+[MIT](LICENSE)

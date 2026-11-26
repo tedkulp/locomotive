@@ -1,4 +1,4 @@
-"""Working Copy: Ted's own clone, which Runs may execute in place, dirty files and all.
+"""Working Copy: the user's own clone, which Runs may execute in place, dirty files and all.
 
 Part of the Checkout module. locomotive only reads the Working Copy and runs in it: it never commits,
 pulls, pushes or fetches it, and it reads it without taking git's optional locks, so even ``git status``

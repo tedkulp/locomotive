@@ -1,4 +1,4 @@
-"""Launch options: what Ted (or a client) may ask of a Run, validated loudly, and the command they mean.
+"""Launch options: what a user (or a client) may ask of a Run, validated loudly, and the command they mean.
 
 Every option here is one locomotive can honour. Anything else is rejected at launch (``extra="forbid"``),
 so nothing is ever silently ignored.

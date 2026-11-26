@@ -1,6 +1,6 @@
 """Notifications: one ntfy message per notable Run, sent straight to the configured ntfy server.
 
-The fake HTTP server stands in for ntfy; what it captured is what Ted's phone would get.
+The fake HTTP server stands in for ntfy; what it captured is what the user's phone would get.
 """
 
 import json

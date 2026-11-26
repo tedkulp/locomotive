@@ -40,7 +40,7 @@ def test_status_shows_ahead_and_behind_origin_as_last_fetched(wc_client, working
     remote.commit({"README.md": "upstream 2\n"})
 
     before_fetch = wc_client.get("/api/working-copy").json()
-    working_copy.git("fetch", "-q", "origin")  # Ted fetching; locomotive never does
+    working_copy.git("fetch", "-q", "origin")  # the user fetching; locomotive never does
     after_fetch = wc_client.get("/api/working-copy").json()
 
     assert (before_fetch["ahead"], before_fetch["behind"]) == (1, 0)

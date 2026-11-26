@@ -1,6 +1,6 @@
 """All deployment-specific values come from here (env vars prefixed ``LOCOMOTIVE_``).
 
-Nothing homelab-specific lives in the app code: the deploy role supplies these.
+Nothing deployment-specific lives in the app code: whoever deploys locomotive supplies these.
 """
 
 from pathlib import Path
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # Previews must answer within the 10s MCP budget; the helper itself is killed after this long.
     preview_timeout_seconds: float = 8.0
 
-    # Where Ted opens locomotive (e.g. https://locomotive.example.com): notifications link to the Run page
+    # Where users open locomotive (e.g. https://locomotive.example.com): notifications link to the Run page
     # there. Unset: https://<public_hostname>; neither set: notifications carry no click-through.
     public_url: str | None = None
 

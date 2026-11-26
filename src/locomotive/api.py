@@ -88,7 +88,7 @@ async def list_branches(request: Request) -> dict:
 async def working_copy_status(request: Request) -> dict:
     """The Working Copy's branch, HEAD, dirty and untracked files, and ahead/behind its upstream.
 
-    Ahead/behind is against the Working Copy's own remote-tracking branch as last fetched by Ted:
+    Ahead/behind is against the Working Copy's own remote-tracking branch as last fetched in that clone:
     locomotive never fetches (or otherwise writes to) the Working Copy.
     """
     wc = request.app.state.working_copy

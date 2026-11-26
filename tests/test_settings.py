@@ -1,4 +1,4 @@
-"""No homelab-specific value lives in the app code: everything comes from settings or env."""
+"""No deployment-specific value lives in the app code: everything comes from settings or env."""
 
 import base64
 import hashlib

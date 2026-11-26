@@ -199,7 +199,7 @@ class Notifier:
 
 
 def run_summary(run: Run) -> str:
-    """What Ted needs to triage from his phone. Built from the Run record only: never log lines."""
+    """What the user needs to triage from a phone. Built from the Run record only: never log lines."""
     source = run.source
     if run.schedule_name:
         source = f"{source} ({run.schedule_name})"
