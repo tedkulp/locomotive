@@ -678,7 +678,7 @@ class EventFollower:
             self._grid.apply(event)
             if event.get("stdout"):
                 host = (event.get("event_data") or {}).get("host")
-                self._log.append(event["stdout"], kind="ansible", host=host)
+                self._grid.link_log(event, self._log.append(event["stdout"], kind="ansible", host=host))
             if self._consume:
                 pending[counter].unlink(missing_ok=True)
 

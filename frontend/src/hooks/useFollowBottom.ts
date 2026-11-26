@@ -17,6 +17,10 @@ function atBottom(el: HTMLElement): boolean {
  *
  * `contentKey` should change whenever the content changes (e.g. line count,
  * filter). While `active` is false nothing is pinned automatically.
+ *
+ * `jumpTo(top)` scrolls somewhere on the reader's behalf (e.g. to a task's
+ * line): follow turns off as if they had scrolled up, and landing at the
+ * bottom doesn't resume it until they scroll themselves or press resume.
  */
 export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: unknown, active = true) {
   const [follow, setFollowState] = useState(true);
@@ -29,6 +33,8 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: 
   }, []);
 
   const draggingScrollbar = useRef(false);
+  // Set by jumpTo: the scroll it causes must not count as reaching the bottom by hand.
+  const jumped = useRef(false);
 
   const pin = useCallback(() => {
     const el = ref.current;
@@ -61,16 +67,20 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: 
     const el = ref.current;
     if (!el) return;
     const stop = () => {
+      jumped.current = false;
       if (followRef.current && el.scrollTop > 0) setFollow(false);
     };
     let touchY = 0;
     const onWheel = (e: WheelEvent) => {
+      jumped.current = false;
       if (e.deltaY < 0) stop();
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      jumped.current = false;
       if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") stop();
     };
     const onTouchStart = (e: TouchEvent) => {
+      jumped.current = false;
       touchY = e.touches[0]?.clientY ?? 0;
     };
     const onTouchMove = (e: TouchEvent) => {
@@ -79,6 +89,7 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: 
     // A press outside the client area is on a scrollbar: don't fight the drag.
     const onPointerDown = (e: PointerEvent) => {
       if (e.target === el && (e.offsetX >= el.clientWidth || e.offsetY >= el.clientHeight)) {
+        jumped.current = false;
         draggingScrollbar.current = true;
       }
     };
@@ -110,7 +121,7 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: 
       if (atBottom(el)) {
         // Only moving down onto the bottom resumes; an upward scroll still
         // within the slack (or content shrinking) must not undo a stop.
-        if (!movedUp && !followRef.current) setFollow(true);
+        if (!movedUp && !followRef.current && !jumped.current) setFollow(true);
       } else if (movedUp && followRef.current) {
         setFollow(false);
       }
@@ -119,9 +130,21 @@ export function useFollowBottom(ref: RefObject<HTMLElement | null>, contentKey: 
   );
 
   const resume = useCallback(() => {
+    jumped.current = false;
     pin();
     setFollow(true);
   }, [pin, setFollow]);
 
-  return { follow, onScroll, resume };
+  const jumpTo = useCallback(
+    (top: number) => {
+      const el = ref.current;
+      if (!el) return;
+      jumped.current = true;
+      setFollow(false);
+      el.scrollTop = top;
+    },
+    [ref, setFollow],
+  );
+
+  return { follow, onScroll, resume, jumpTo };
 }

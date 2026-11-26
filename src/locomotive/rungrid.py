@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from locomotive.runlog import LogLine
+
 RECAP_KEYS = ("ok", "changed", "skipped", "failed", "unreachable")
 # playbook_on_stats key -> recap key
 STATS_KEYS = {"ok": "ok", "changed": "changed", "skipped": "skipped", "failures": "failed", "dark": "unreachable"}
@@ -67,11 +69,25 @@ class RunGrid:
                 "name": data.get("task") or data.get("name") or "",
                 "play": data.get("play"),
                 "included_from": self._included.get(path),
+                # seq of the task's banner line in the Run log, once written; None if it never was (log cap)
+                "log_seq": None,
                 "results": {},
             }
             self._by_uuid[uuid] = row
             self.tasks.append(row)
         return row
+
+    def link_log(self, event: dict[str, Any], written: list[LogLine]) -> None:
+        """Given the log lines an event's output became, link a task-start event's row to its banner line:
+        the first non-blank one ("TASK [...]", "RUNNING HANDLER [...]"). None written (past the log cap) leaves
+        the row unlinked; the first banner wins (a handler can run again)."""
+        if event.get("event") not in STOP_EVENTS:
+            return
+        row = self._by_uuid.get((event.get("event_data") or {}).get("task_uuid") or "")
+        banner = next((line for line in written if line.text.strip()), None)
+        if row is not None and banner is not None and row.get("log_seq") is None:
+            row["log_seq"] = banner.seq
+            self.version += 1
 
     def _cell(self, data: dict[str, Any], status: str) -> None:
         host = data.get("host")
@@ -166,6 +182,8 @@ class RunGrid:
         grid.version = data.get("version", 0)
         grid.hosts = data.get("hosts", [])
         grid.tasks = data.get("tasks", [])
+        for row in grid.tasks:
+            row.setdefault("log_seq", None)  # saved before task rows linked to the log
         grid._by_uuid = {row["id"]: row for row in grid.tasks}
         grid.counts = data.get("counts", {})
         grid.stats = data.get("stats")

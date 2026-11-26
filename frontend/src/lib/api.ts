@@ -115,6 +115,8 @@ export interface GridTask {
   name: string;
   play: string | null;
   included_from: string | null;
+  /** seq of the task's `TASK [...]` banner in the Run log; null if it isn't in the log (truncated, or an older grid). */
+  log_seq: number | null;
   results: Record<string, CellStatus>;
 }
 
