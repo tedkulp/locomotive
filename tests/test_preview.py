@@ -2,7 +2,7 @@
 
 import json
 
-from conftest import wait_for_run
+from conftest import wait_for_run, wait_until
 
 PLAYS = [
     {
@@ -178,6 +178,22 @@ def test_a_slow_helper_times_out_within_the_preview_budget(start_app, stubs):
 
     assert resp.status_code == 504
     assert resp.elapsed.total_seconds() < 3
+
+
+def test_a_preview_while_the_runtime_is_still_preparing_says_retry_and_keeps_preparing(start_app, stubs):
+    client = start_app(preview_timeout_seconds=1)
+    stubs.script(mise_install_gate=True)
+
+    resp = client.post("/api/preview", json={"playbook": "servers.yml"})
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "2"
+    assert "still preparing" in resp.json()["detail"].lower()
+    assert resp.elapsed.total_seconds() < 3
+
+    stubs.release_gate()  # the install finishes in the background; the next ask gets the preview
+    wait_until(lambda: client.post("/api/preview", json={"playbook": "servers.yml"}).status_code == 200)
+    assert len([c for c in stubs.calls("mise") if c["argv"][:1] == ["install"]]) == 1
 
 
 def test_previews_only_pass_on_known_fields_never_host_vars(client, stubs):

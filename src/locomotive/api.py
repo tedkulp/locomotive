@@ -163,7 +163,8 @@ async def preview(body: PreviewRequest, request: Request) -> dict:
             options, body.branch or state.settings.default_branch, body.sha, body.expand_includes
         )
     except PreviewError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=headers) from exc
     except WorkingCopyUnavailable as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except UnknownBranch as exc:

@@ -103,6 +103,9 @@ shows "log pruned on <date>" (`log_pruned_at`; its `/log` and `/grid` answer 410
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run
 with the Python interpreter of the checkout's own ansible-core (never imported by the app). It emits names
 only (groups, hosts, plays, tasks, tags), never host vars, and `ansible-inventory` is never used.
+The first preview of a commit or Working Copy prepares its Ansible runtime (`mise install`, collections),
+which can outlast the preview time limit: the preparation carries on in the background and the preview
+answers `503` with `Retry-After: 2` until it is ready (the launch form keeps asking and says so).
 
 `uv run pytest` includes seam 2 (`tests/test_smoke_real_ansible.py`): the real helper and one real
 `ansible-runner` Run against `localhost`, with the ansible-core pinned there. It needs `mise` on PATH

@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { usePolling } from "@/hooks/usePolling";
 import {
   api,
+  ApiError,
   type CheckoutChoice,
   type LaunchOptions,
   type PlaybookList,
@@ -38,6 +39,8 @@ export function LaunchPage() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // Set while the server is still preparing the Ansible runtime for the preview (we keep asking).
+  const [previewPreparing, setPreviewPreparing] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [fromWorkingCopy, setFromWorkingCopy] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
@@ -91,11 +94,13 @@ export function LaunchPage() {
   );
   const optionsKey = options ? JSON.stringify([options, expandIncludes, choiceKey]) : null;
 
-  // Preview hosts, tasks and the command for exactly these options (debounced, latest wins).
+  // Preview hosts, tasks and the command for exactly these options (debounced, latest wins). While the
+  // server is still preparing the Ansible runtime it answers 503 + Retry-After: keep asking until it's ready.
   useEffect(() => {
     if (!options || !optionsKey) return;
     const controller = new AbortController();
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const ask = () =>
       api
         .preview(
           {
@@ -115,14 +120,22 @@ export function LaunchPage() {
             setPreview(p);
             setPreviewKey(optionsKey);
             setPreviewError(null);
+            setPreviewPreparing(null);
           },
           (e: Error) => {
             if (controller.signal.aborted) return;
+            if (e instanceof ApiError && e.status === 503 && e.retryAfter) {
+              setPreviewPreparing(e.message);
+              setPreviewError(null);
+              timer = setTimeout(ask, e.retryAfter * 1000);
+              return;
+            }
+            setPreviewPreparing(null);
             setPreviewKey(optionsKey);
             setPreviewError(e.message);
           },
         );
-    }, PREVIEW_DEBOUNCE_MS);
+    timer = setTimeout(ask, PREVIEW_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
@@ -272,6 +285,13 @@ export function LaunchPage() {
                 setExpand={setExpandIncludes}
               />
             </Card>
+
+            {previewPreparing && !previewError && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 flex items-center gap-2">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-amber-600 border-t-transparent" />
+                {previewPreparing}
+              </div>
+            )}
 
             {previewError && (
               <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

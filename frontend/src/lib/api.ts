@@ -185,7 +185,16 @@ export interface LogLine {
   host: string | null;
 }
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    /** Seconds to wait before asking again, when the server says it is still working (Retry-After). */
+    readonly retryAfter?: number,
+  ) {
+    super(message);
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
@@ -202,7 +211,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* not JSON */
     }
-    throw new ApiError(detail);
+    const retryAfter = Number(resp.headers.get("Retry-After"));
+    throw new ApiError(detail, resp.status, retryAfter > 0 ? retryAfter : undefined);
   }
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;

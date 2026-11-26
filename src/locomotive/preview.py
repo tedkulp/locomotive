@@ -32,9 +32,14 @@ TASKS_LABEL = "tasks that may run"
 class PreviewError(Exception):
     """The preview can't be given; ``status`` is the HTTP status that says why."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
+
+
+# Seconds a client should wait before asking again while a runtime is still being prepared.
+PREPARING_RETRY_SECONDS = 2
 
 
 @dataclass
@@ -143,8 +148,11 @@ class Previewer:
             # Shielded: a request that runs out of time leaves the preparation running for the next one.
             runtime = await asyncio.wait_for(asyncio.shield(prepared.task), max(deadline - time.monotonic(), 0.1))
         except TimeoutError:
+            # Not a failure: the preparation carries on, and the client asks again after Retry-After.
             raise PreviewError(
-                504, f"Still preparing the runtime {where}; try the preview again shortly"
+                503,
+                f"Still preparing the Ansible runtime {where} (first use installs it); try again shortly",
+                retry_after=PREPARING_RETRY_SECONDS,
             ) from None
         except (ToolchainError, CheckoutError) as exc:
             raise PreviewError(502, str(exc)) from exc
