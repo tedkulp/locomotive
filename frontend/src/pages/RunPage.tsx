@@ -1,11 +1,12 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router";
 
 import { CheckoutBadge, ModeBadge, SourceBadge, StatusBadge } from "@/components/RunBadges";
 import { Button } from "@/components/ui/button";
+import { useFollowBottom } from "@/hooks/useFollowBottom";
 import { useNow, usePolling } from "@/hooks/usePolling";
 import { useRunLog } from "@/hooks/useRunLog";
-import { api, isFinished, type CellStatus, type Grid, type LogLine, type Recap, type Run, type WorkingCopyDiff } from "@/lib/api";
+import { api, isFinished, type CellStatus, type Grid, type GridTask, type LogLine, type Recap, type Run, type WorkingCopyDiff } from "@/lib/api";
 import { formatBytes, formatDate, runDuration } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -26,6 +27,11 @@ export function RunPage() {
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const toggleHost = (host: string) => setHostFilter((current) => (current === host ? null : host));
   useEffect(() => setHostFilter(null), [runId]);
+  // The latest click on a task name, for the log to scroll to.
+  const [jump, setJump] = useState<LogJump | null>(null);
+  useEffect(() => setJump(null), [runId]);
+  const jumpTo = (seq: number) => setJump((current) => ({ seq, click: (current?.click ?? 0) + 1 }));
+  const lastSeq = lines.length ? lines[lines.length - 1].seq : 0;
 
   if (error && !run) return <div className="p-10 text-destructive">{error}</div>;
   if (!run) return null;
@@ -84,13 +90,26 @@ export function RunPage() {
         </div>
       )}
       {!run.log_pruned && grid && grid.tasks.length > 0 && (
-        <TaskGrid grid={grid} live={live} hostFilter={hostFilter} onHost={toggleHost} />
+        <TaskGrid
+          grid={grid}
+          live={live}
+          linkBlocker={(task) => logLinkBlocker(task, lastSeq, live, run.log_truncated)}
+          hostFilter={hostFilter}
+          onHost={toggleHost}
+          onTask={jumpTo}
+        />
       )}
       <div className="flex-1 grid grid-cols-[1fr_320px] min-h-0">
         {run.log_pruned ? (
           <div className="p-6 text-sm text-muted-foreground bg-card">No log: it was pruned.</div>
         ) : (
-          <LogView lines={lines} live={live} hostFilter={hostFilter} onClear={() => setHostFilter(null)} />
+          <LogView
+            lines={lines}
+            live={live}
+            hostFilter={hostFilter}
+            onClear={() => setHostFilter(null)}
+            jump={jump}
+          />
         )}
         <RecapPanel
           hosts={run.log_pruned ? [] : (grid?.hosts ?? [])}
@@ -267,31 +286,39 @@ function WorkingCopyChanges({ run }: { run: Run }) {
   );
 }
 
+/** Why a task name can't be clicked through to the log, or null if it can. */
+function logLinkBlocker(task: GridTask, lastSeq: number, live: boolean, logTruncated: boolean): string | null {
+  if (task.log_seq != null) return task.log_seq <= lastSeq ? null : "Not in the log yet: still loading";
+  if (logTruncated) return "Not in the log: log truncated";
+  if (live) return "Not in the log yet";
+  return "Not in the log: this Run's grid predates links to the log";
+}
+
 function TaskGrid({
   grid,
   live,
+  linkBlocker,
   hostFilter,
   onHost,
+  onTask,
 }: {
   grid: Grid;
   live: boolean;
+  /** Why a task can't be clicked through to the log, or null if it can. */
+  linkBlocker: (task: GridTask) => string | null;
   hostFilter: string | null;
   onHost: (host: string) => void;
+  onTask: (seq: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [follow, setFollow] = useState(true);
-  useEffect(() => {
-    if (live && follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [grid.tasks.length, live, follow]);
+  const { onScroll } = useFollowBottom(ref, grid.tasks.length, live);
 
   return (
     <div
       ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 20);
-      }}
-      className="overflow-auto max-h-[45%] border-b border-border bg-card"
+      onScroll={onScroll}
+      tabIndex={0}
+      className={cn("overflow-auto max-h-[45%] border-b border-border bg-card", SCROLL_FOCUS)}
     >
       <table className="text-xs border-separate border-spacing-0">
         <thead className="sticky top-0 bg-card z-10">
@@ -316,6 +343,9 @@ function TaskGrid({
           {grid.tasks.map((task, i) => {
             const newPlay = task.play && task.play !== grid.tasks[i - 1]?.play;
             const running = Object.values(task.results).includes("running");
+            const blocker = linkBlocker(task);
+            const linkSeq = blocker === null ? task.log_seq : null;
+            const includedFrom = task.included_from ? `from ${task.included_from}` : null;
             return (
               <Fragment key={task.id}>
                 {newPlay && (
@@ -330,13 +360,23 @@ function TaskGrid({
                 )}
                 <tr className={cn(running && "bg-sky-50")}>
                   <td
-                    title={task.included_from ? `from ${task.included_from}` : undefined}
+                    title={[includedFrom, blocker ?? "Show this task in the log"].filter(Boolean).join(" · ")}
                     className={cn(
                       "px-3 py-0.5 font-mono truncate max-w-[360px]",
                       task.included_from && "pl-7 text-fuchsia-800",
                     )}
                   >
-                    {task.name}
+                    {linkSeq != null ? (
+                      <button
+                        type="button"
+                        onClick={() => onTask(linkSeq)}
+                        className="max-w-full truncate text-left hover:underline cursor-pointer"
+                      >
+                        {task.name}
+                      </button>
+                    ) : (
+                      <span className="cursor-default">{task.name}</span>
+                    )}
                   </td>
                   {grid.hosts.map((host) => {
                     const status = task.results[host];
@@ -421,23 +461,51 @@ function RecapPanel({
   );
 }
 
+/** A click on a task name: scroll the log to line `seq`. `click` counts clicks, so the same task jumps again. */
+type LogJump = { seq: number; click: number };
+
+const HIGHLIGHT_MS = 2000;
+const HIGHLIGHT_FADE_MS = 500;
+
+/** Keyboard focus on a scroll pane (focusable so arrow/page keys scroll it and reach useFollowBottom). */
+const SCROLL_FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40";
+
 function LogView({
   lines,
   live,
   hostFilter,
   onClear,
+  jump,
 }: {
   lines: LogLine[];
   live: boolean;
   hostFilter: string | null;
   onClear: () => void;
+  jump: LogJump | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [follow, setFollow] = useState(true);
   const shown = hostFilter ? lines.filter((line) => !line.host || line.host === hostFilter) : lines;
-  useEffect(() => {
-    if (follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [shown.length, follow]);
+  const { follow, onScroll, resume, jumpTo } = useFollowBottom(ref, `${hostFilter ?? ""}:${shown.length}`);
+  // The jumped-to line: lit, then fading back (it keeps its transition until the fade is over).
+  const [highlight, setHighlight] = useState<{ seq: number; lit: boolean } | null>(null);
+
+  // Only a new click jumps (not new lines or a filter change): put the banner mid-log, follow off, and flash it.
+  // The banner names no host, so it is shown under any host filter.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!jump || !el) return;
+    const target = el.querySelector<HTMLElement>(`[data-seq="${jump.seq}"]`);
+    if (!target) return;
+    const offset = target.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+    jumpTo(Math.max(0, offset - el.clientHeight / 2 + target.offsetHeight / 2));
+    setHighlight({ seq: jump.seq, lit: true });
+    const fade = window.setTimeout(() => setHighlight({ seq: jump.seq, lit: false }), HIGHLIGHT_MS);
+    const clear = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS + HIGHLIGHT_FADE_MS);
+    return () => {
+      window.clearTimeout(fade);
+      window.clearTimeout(clear);
+    };
+  }, [jump, jumpTo]);
   return (
     <div className="relative min-h-0">
       {hostFilter && (
@@ -450,14 +518,21 @@ function LogView({
       )}
       <div
         ref={ref}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 20);
-        }}
-        className="h-full overflow-auto font-mono text-[12px] leading-5 p-3 bg-card"
+        onScroll={onScroll}
+        tabIndex={0}
+        className={cn("h-full overflow-auto font-mono text-[12px] leading-5 p-3 bg-card", SCROLL_FOCUS)}
       >
         {shown.map((line) => (
-          <div key={line.seq} className={cn("whitespace-pre-wrap", lineTone(line))}>
+          <div
+            key={line.seq}
+            data-seq={line.seq}
+            className={cn(
+              "whitespace-pre-wrap",
+              lineTone(line),
+              highlight?.seq === line.seq && "transition-colors duration-500",
+              highlight?.seq === line.seq && highlight.lit && "bg-yellow-200",
+            )}
+          >
             {line.text || " "}
           </div>
         ))}
@@ -466,7 +541,7 @@ function LogView({
       {!follow && (
         <button
           type="button"
-          onClick={() => setFollow(true)}
+          onClick={resume}
           className="absolute bottom-3 right-5 text-xs rounded-full bg-primary text-primary-foreground px-3 py-1 shadow"
         >
           ↓ follow

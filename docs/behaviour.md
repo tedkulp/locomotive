@@ -48,6 +48,31 @@ re-resolves its hosts as it starts (first preparing its toolchain again if its `
 History page loads older pages on demand and shows the reason of each skipped, missed, interrupted, failed
 or canceled entry.
 
+### Run page
+
+The Run page streams the log (SSE) under a task x host grid; clicking a host header filters the log to
+that host's lines (lines with no host, such as banners, always show).
+
+- **Follow:** the log pane and the grid stay pinned to their bottom as output arrives. Follow stops only
+  when the reader scrolls up (a wheel, touch, ArrowUp/PageUp/Home in a focused pane, or the scroll
+  position moving up); new output, however much arrives at once, never stops it, and dragging the
+  scrollbar is never fought. Scrolling back down to the bottom by hand, or the log's "↓ follow" button,
+  resumes it. The grid follows only while the Run is live.
+- **Jump to a task:** clicking a task name in the grid scrolls the log to that task's banner, centres and
+  briefly highlights it, and turns follow off (as a scroll up would; "↓ follow" resumes, and landing at
+  the bottom doesn't). Same-named tasks jump to their own banners. Under a host filter it still lands on
+  the banner, which names no host.
+- A task name is not clickable when its banner isn't in the log; its tooltip says why: "Not in the log:
+  log truncated" (banner past the cap), "Not in the log yet" (live, banner not written yet), "Not in the
+  log yet: still loading" (written but not streamed in yet), or "Not in the log: this Run's grid predates
+  links to the log".
+
+Each grid task row (`GET /api/runs/<id>/grid` and the SSE `grid` event) carries `log_seq`, the `seq` of
+its banner line in the log. It is null when the banner fell past `LOCOMOTIVE_LOG_CAP_BYTES`, when no
+banner was printed, and for grids saved before the field existed. The banner is usually written by the
+task-start event, but with `display_skipped_hosts` or `display_ok_hosts` off Ansible defers it to the
+task's first shown result, and that is linked too.
+
 ## Previews
 
 Previews (`POST /api/preview`) and each Run's host set come from `src/locomotive/preview_helper.py`, run

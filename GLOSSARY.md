@@ -12,6 +12,10 @@ _Avoid_: task, template, job
 One execution of a Playbook from a Controller against a chosen set of hosts, with its own log and outcome. It runs the Ansible repo as of one commit, or the Working Copy.
 _Avoid_: task (that is one step inside a play), job
 
+**Banner**:
+The line in a Run's log that opens a task's output, `TASK [<name>] ***` (or `RUNNING HANDLER [<name>] ***` for a handler). Clicking a task in the Run page's grid jumps to it.
+_Avoid_: header, task line
+
 **Working Copy**:
 The clone of the Ansible repo on the Controller where edits are made, which a Run can use with uncommitted changes.
 _Avoid_: dev checkout, local repo

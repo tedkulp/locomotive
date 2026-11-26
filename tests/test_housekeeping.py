@@ -4,7 +4,7 @@ housekeeping pass (04:00 local and at startup), and what a pruned Run still show
 import pytest
 
 from conftest import wait_for_run, wait_until
-from test_run_grid import changed, result, stats, task
+from test_run_grid import banner_of, changed, result, stats, task
 from test_schedules import create, iso, local, tick
 
 GIB = 1024**3
@@ -92,6 +92,19 @@ def test_a_log_stops_at_the_cap_while_the_run_carries_on_with_a_correct_grid_and
     assert run["recap"]["alpha"] == {"ok": 401, "changed": 1, "skipped": 0, "failed": 0, "unreachable": 0}
     grid = client.get(f"/api/runs/{run['id']}/grid").json()
     assert [t["name"] for t in grid["tasks"]] == ["Chatter", "Change it"]
+
+
+def test_tasks_whose_banner_came_after_the_cap_have_no_log_position(start_app, stubs):
+    client = start_app(log_cap_bytes=20_000)
+    stubs.script(runner=chatty(lines=400))
+
+    run = wait_for_run(client, launch(client))
+
+    tasks = client.get(f"/api/runs/{run['id']}/grid").json()["tasks"]
+    lines = client.get(f"/api/runs/{run['id']}/log").json()["lines"]
+    chatter, change_it = tasks
+    assert banner_of(lines, chatter["log_seq"]) == "TASK [Chatter] *****"
+    assert change_it["log_seq"] is None
 
 
 def _disk_bytes(*dirs) -> int:

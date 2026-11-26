@@ -157,9 +157,11 @@ class RunLog:
             self._bytes = 0
         self.truncated = cap is not None and self._bytes >= cap
 
-    def append(self, text: str, kind: str = "ansible", host: str | None = None) -> None:
+    def append(self, text: str, kind: str = "ansible", host: str | None = None) -> list[LogLine]:
+        """Appends ``text`` line by line; returns the lines that went in (none past the cap)."""
+        written: list[LogLine] = []
         if self.truncated and kind != "locomotive":
-            return
+            return written
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             for line in ANSI.sub("", text).splitlines() or [""]:
@@ -167,10 +169,12 @@ class RunLog:
                 raw = json.dumps(item) + "\n"
                 if kind != "locomotive" and self._cap is not None and self._bytes + len(raw) > self._cap:
                     self._truncate(f)
-                    return
+                    return written
                 self._seq += 1
                 self._bytes += len(raw)  # json.dumps escapes to ASCII: chars are bytes
                 f.write(raw)
+                written.append(LogLine(self._seq, line, kind, host))
+        return written
 
     def _truncate(self, f: IO[str]) -> None:
         self.truncated = True

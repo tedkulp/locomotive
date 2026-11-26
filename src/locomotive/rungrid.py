@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+from locomotive.runlog import LogLine
 
 RECAP_KEYS = ("ok", "changed", "skipped", "failed", "unreachable")
 # playbook_on_stats key -> recap key
@@ -18,7 +21,9 @@ STATS_KEYS = {"ok": "ok", "changed": "changed", "skipped": "skipped", "failures"
 RESULT_EVENTS = {
     "runner_on_ok", "runner_on_failed", "runner_on_skipped", "runner_on_unreachable",
 }
-STOP_EVENTS = {"playbook_on_task_start", "playbook_on_handler_task_start"}
+TASK_START_EVENTS = {"playbook_on_task_start", "playbook_on_handler_task_start"}
+# How a task's banner line in the Run log starts.
+BANNER_PREFIXES = ("TASK [", "RUNNING HANDLER [")
 
 
 class RunGrid:
@@ -36,10 +41,13 @@ class RunGrid:
 
     # ------------------------------------------------------------------ folding events
 
-    def apply(self, event: dict[str, Any]) -> None:
+    def apply(self, event: dict[str, Any], written: Sequence[LogLine] = ()) -> None:
+        """Folds one runner event in. ``written`` is what the event's stdout became in the Run log (see
+        ``RunLog.append``), so the event's task row can be linked to its banner line there."""
         kind = event.get("event")
         data = event.get("event_data") or {}
-        if kind in STOP_EVENTS:
+        changed = True
+        if kind in TASK_START_EVENTS:
             self._task(data)
         elif kind == "playbook_on_include":
             path = data.get("included_file")
@@ -52,8 +60,9 @@ class RunGrid:
         elif kind == "playbook_on_stats":
             self.stats = _recap_from_stats(data)
         else:
-            return
-        self.version += 1
+            changed = False
+        if self._link_banner(data, written) or changed:
+            self.version += 1
 
     def _task(self, data: dict[str, Any]) -> dict[str, Any] | None:
         uuid = data.get("task_uuid")
@@ -67,11 +76,28 @@ class RunGrid:
                 "name": data.get("task") or data.get("name") or "",
                 "play": data.get("play"),
                 "included_from": self._included.get(path),
+                # seq of the task's banner line in the Run log, once written; None if it never was (log cap)
+                "log_seq": None,
                 "results": {},
             }
             self._by_uuid[uuid] = row
             self.tasks.append(row)
         return row
+
+    def _link_banner(self, data: dict[str, Any], written: Sequence[LogLine]) -> bool:
+        """Links the event's task row to its banner line ("TASK [...]", "RUNNING HANDLER [...]") if that is the
+        first non-blank line of ``written``. Usually the task-start event writes it, but with
+        ``display_skipped_hosts`` or ``display_ok_hosts`` off, Ansible's default callback defers the banner to
+        the stdout of the first result it shows, so any event for the task can carry it. Nothing written (past
+        the log cap) leaves the row unlinked; the first banner wins (a handler can run again). True if linked."""
+        row = self._by_uuid.get(data.get("task_uuid") or "")
+        if row is None or row.get("log_seq") is not None:
+            return False
+        first = next((line for line in written if line.text.strip()), None)
+        if first is None or not first.text.lstrip().startswith(BANNER_PREFIXES):
+            return False
+        row["log_seq"] = first.seq
+        return True
 
     def _cell(self, data: dict[str, Any], status: str) -> None:
         host = data.get("host")
@@ -166,6 +192,8 @@ class RunGrid:
         grid.version = data.get("version", 0)
         grid.hosts = data.get("hosts", [])
         grid.tasks = data.get("tasks", [])
+        for row in grid.tasks:
+            row.setdefault("log_seq", None)  # saved before task rows linked to the log
         grid._by_uuid = {row["id"]: row for row in grid.tasks}
         grid.counts = data.get("counts", {})
         grid.stats = data.get("stats")
