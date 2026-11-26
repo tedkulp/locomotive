@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { usePolling } from "@/hooks/usePolling";
+import { useRememberedState } from "@/hooks/useRememberedState";
 import {
   api,
   ApiError,
@@ -42,14 +43,20 @@ export function LaunchPage() {
   // Set while the server is still preparing the Ansible runtime for the preview (we keep asking).
   const [previewPreparing, setPreviewPreparing] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [fromWorkingCopy, setFromWorkingCopy] = useState(false);
-  const [branch, setBranch] = useState<string | null>(null);
+  // Remembered across page changes and reloads: the checkout choice is what Ted flips most while developing.
+  const [fromWorkingCopy, setFromWorkingCopy] = useRememberedState("launch.fromWorkingCopy", false);
+  const [branch, setBranch] = useRememberedState<string | null>("launch.branch", null);
   const [branches, setBranches] = useState<{ default: string; branches: string[] } | null>(null);
   const { data: wc } = usePolling(api.workingCopy, WORKING_COPY_POLL_MS);
 
   useEffect(() => {
     api.branches().then(setBranches, (e: Error) => setError(e.message));
   }, []);
+
+  // A remembered branch that the remote no longer has falls back to the default.
+  useEffect(() => {
+    if (branches && branch !== null && !branches.branches.includes(branch)) setBranch(null);
+  }, [branches, branch, setBranch]);
 
   const wcAvailable = wc?.available === true;
   // The switch is never overridden: if the Working Copy goes away while it is on, the form says so and
