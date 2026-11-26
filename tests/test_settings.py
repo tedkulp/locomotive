@@ -35,13 +35,13 @@ def test_app_code_holds_no_homelab_values():
     assert offenders == []
 
 
-def _main(env: dict[str, str], port: int) -> subprocess.Popen:
+def _main(env: dict[str, str], port: int, cwd: Path | None = None) -> subprocess.Popen:
     """``python -m locomotive`` (the real entry point) with only ``env`` as its LOCOMOTIVE_* settings."""
     clean = {k: v for k, v in os.environ.items() if not k.startswith("LOCOMOTIVE_")}
     return subprocess.Popen(
         [sys.executable, "-m", "locomotive"],
         env={**clean, **env, "LOCOMOTIVE_HOST": "127.0.0.1", "LOCOMOTIVE_PORT": str(port)},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=cwd,
     )
 
 
@@ -49,9 +49,9 @@ def _main(env: dict[str, str], port: int) -> subprocess.Popen:
 def main_app():
     procs: list[subprocess.Popen] = []
 
-    def start(env: dict[str, str]) -> httpx.Client:
+    def start(env: dict[str, str], cwd: Path | None = None) -> httpx.Client:
         port = _free_port()
-        proc = _main(env, port)
+        proc = _main(env, port, cwd)
         procs.append(proc)
         client = httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10)
         deadline = time.monotonic() + 20
@@ -122,6 +122,34 @@ def test_every_deployment_value_is_read_from_env(main_app, tmp_path, fake_http, 
     assert client.post("/mcp", json=body, headers=mcp | {"Host": "controller.example.invalid"}).status_code not in (401, 421)
     assert client.post("/mcp", json=body, headers=mcp | {"Host": "elsewhere.example.invalid"}).status_code == 421
     assert client.post("/mcp", json=body, headers={"Host": "controller.example.invalid"}).status_code == 401
+
+
+def test_relative_paths_in_settings_resolve_against_the_launch_directory(main_app, tmp_path, remote, working_copy, stubs):
+    # Tools run with the checkout as their cwd, so a relative data dir must not be read against it:
+    # collections would land in the Working Copy and the app would not find them.
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    working_copy.write({
+        "playbooks/wip.yml": "- hosts: all\n  tasks: []\n",
+        "collections/requirements.yml": "collections: []\n",
+    })
+    client = main_app({
+        "LOCOMOTIVE_DATA_DIR": "data",
+        "LOCOMOTIVE_REPO_URL": remote.url,
+        "LOCOMOTIVE_WORKING_COPY_PATH": os.path.relpath(working_copy.path, launch),
+        "LOCOMOTIVE_TRUSTED_PROXY_IPS": "127.0.0.1",
+        "LOCOMOTIVE_IDENTITY_HEADER": "X-Who",
+        "LOCOMOTIVE_ALLOWLIST": "alice@example.invalid",
+        "LOCOMOTIVE_MISE_BIN": str(stubs.mise),
+    }, cwd=launch)
+    alice = {"X-Who": "alice@example.invalid"}
+
+    assert client.get("/api/working-copy", headers=alice).json()["path"] == str(working_copy.path)
+    resp = client.post("/api/preview", json={"playbook": "wip.yml", "checkout": "working_copy"}, headers=alice)
+
+    assert resp.status_code == 200, resp.text
+    assert [p.name for p in (launch / "data" / "collections").iterdir() if not p.name.startswith(".")]
+    assert not (working_copy.path / "data").exists()
 
 
 @pytest.mark.parametrize("missing", ["LOCOMOTIVE_DATA_DIR", "LOCOMOTIVE_REPO_URL"])

@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # Built frontend served at /; unset means API only.
     static_dir: Path | None = None
 
+    @field_validator("data_dir", "working_copy_path", "static_dir")
+    @classmethod
+    def _absolute(cls, value: Path | None) -> Path | None:
+        # Tools run with a checkout as their cwd, so a relative path would be read against it.
+        return value.expanduser().resolve() if value is not None else None
+
     @field_validator("hidden_playbooks", "trusted_proxy_ips", "allowlist", "mcp_tokens", mode="before")
     @classmethod
     def _split_commas(cls, value: object) -> object:
