@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ STATS_KEYS = {"ok": "ok", "changed": "changed", "skipped": "skipped", "failures"
 RESULT_EVENTS = {
     "runner_on_ok", "runner_on_failed", "runner_on_skipped", "runner_on_unreachable",
 }
-STOP_EVENTS = {"playbook_on_task_start", "playbook_on_handler_task_start"}
+TASK_START_EVENTS = {"playbook_on_task_start", "playbook_on_handler_task_start"}
 
 
 class RunGrid:
@@ -38,10 +39,13 @@ class RunGrid:
 
     # ------------------------------------------------------------------ folding events
 
-    def apply(self, event: dict[str, Any]) -> None:
+    def apply(self, event: dict[str, Any], written: Sequence[LogLine] = ()) -> None:
+        """Folds one runner event in. ``written`` is what the event's stdout became in the Run log (see
+        ``RunLog.append``), so the event's task row can be linked to its banner line there."""
         kind = event.get("event")
         data = event.get("event_data") or {}
-        if kind in STOP_EVENTS:
+        changed = True
+        if kind in TASK_START_EVENTS:
             self._task(data)
         elif kind == "playbook_on_include":
             path = data.get("included_file")
@@ -54,8 +58,9 @@ class RunGrid:
         elif kind == "playbook_on_stats":
             self.stats = _recap_from_stats(data)
         else:
-            return
-        self.version += 1
+            changed = False
+        if (kind in TASK_START_EVENTS and self._link_banner(data, written)) or changed:
+            self.version += 1
 
     def _task(self, data: dict[str, Any]) -> dict[str, Any] | None:
         uuid = data.get("task_uuid")
@@ -77,17 +82,18 @@ class RunGrid:
             self.tasks.append(row)
         return row
 
-    def link_log(self, event: dict[str, Any], written: list[LogLine]) -> None:
-        """Given the log lines an event's output became, link a task-start event's row to its banner line:
-        the first non-blank one ("TASK [...]", "RUNNING HANDLER [...]"). None written (past the log cap) leaves
-        the row unlinked; the first banner wins (a handler can run again)."""
-        if event.get("event") not in STOP_EVENTS:
-            return
-        row = self._by_uuid.get((event.get("event_data") or {}).get("task_uuid") or "")
+    def _link_banner(self, data: dict[str, Any], written: Sequence[LogLine]) -> bool:
+        """Links the event's task row to its banner line among ``written``: the first non-blank one ("TASK [...]",
+        "RUNNING HANDLER [...]"). Nothing written (past the log cap) leaves the row unlinked; the first banner
+        wins (a handler can run again). True if it linked."""
+        row = self._by_uuid.get(data.get("task_uuid") or "")
+        if row is None or row.get("log_seq") is not None:
+            return False
         banner = next((line for line in written if line.text.strip()), None)
-        if row is not None and banner is not None and row.get("log_seq") is None:
-            row["log_seq"] = banner.seq
-            self.version += 1
+        if banner is None:
+            return False
+        row["log_seq"] = banner.seq
+        return True
 
     def _cell(self, data: dict[str, Any], status: str) -> None:
         host = data.get("host")

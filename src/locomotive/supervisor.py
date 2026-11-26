@@ -26,7 +26,7 @@ from locomotive.launch import LaunchOptions
 from locomotive.models import ACTIVE_STATUSES, CheckoutKind, Run, RunStatus
 from locomotive.notifier import Notifier
 from locomotive.rungrid import RunGrid
-from locomotive.runlog import RunLog
+from locomotive.runlog import LogLine, RunLog
 from locomotive.runtime import (
     REQUIREMENTS,
     Runtime,
@@ -675,10 +675,11 @@ class EventFollower:
             if event.get("event") == "runner_on_skipped" and self._stop_done is not None:
                 with contextlib.suppress(OSError):  # written before the skip, so it's there by now
                     self._grid.stop_skipped.update(self._stop_done.read_text().split())
-            self._grid.apply(event)
+            written: list[LogLine] = []
             if event.get("stdout"):
                 host = (event.get("event_data") or {}).get("host")
-                self._grid.link_log(event, self._log.append(event["stdout"], kind="ansible", host=host))
+                written = self._log.append(event["stdout"], kind="ansible", host=host)
+            self._grid.apply(event, written)
             if self._consume:
                 pending[counter].unlink(missing_ok=True)
 
