@@ -1,0 +1,16 @@
+# Generic compose file; the deploy role supplies every deployment value through .env / env_file.
+services:
+  locomotive:
+    build: .
+    image: locomotive:${LOCOMOTIVE_TAG:-dev}
+    user: "1000:1000"
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LOCOMOTIVE_REPO_URL: ${LOCOMOTIVE_REPO_URL:?set LOCOMOTIVE_REPO_URL}
+    ports:
+      - "${LOCOMOTIVE_BIND:-127.0.0.1}:${LOCOMOTIVE_HOST_PORT:-8000}:8000"
+    volumes:
+      - ${LOCOMOTIVE_DATA_PATH:-./data}:/var/lib/locomotive

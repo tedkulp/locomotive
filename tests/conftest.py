@@ -1,0 +1,589 @@
+"""Seam 1 harness: locomotive in-process behind real HTTP, with fakes only at the true edges.
+
+- a temp data dir (real SQLite in WAL mode lives in it);
+- a local bare git repo standing in for the remote (``remote``);
+- stub ``mise`` / ``ansible-runner`` / ``ansible-galaxy`` / ``ansible`` executables driven by a
+  scripted scenario (``stubs``);
+- an injected clock (``clock``);
+- a fake HTTP server capturing outbound calls (``fake_http``);
+- the access guard configured to trust the test peer (127.0.0.1) and allowlist ``IDENTITY``, which
+  ``client`` sends on every request (``anonymous`` builds a client without it).
+
+Tests talk to the app only through ``client`` (an httpx client against a real uvicorn server
+running the app in a background thread).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import httpx
+import httpx2
+import pytest
+import uvicorn
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp_types import CallToolResult
+
+from locomotive.app import create_app
+from locomotive.settings import Settings
+
+STUBS_SRC = Path(__file__).parent / "stubs"
+
+IDENTITY_HEADER = "Tailscale-User-Login"
+IDENTITY = "ted@example.invalid"
+
+# MCP bearer tokens: the app is configured with their sha256 only, each named for its source.
+LXC_TOKEN = "lxc-0123456789abcdef0123456789abcdef"
+MAC_TOKEN = "mac-fedcba9876543210fedcba9876543210"
+PUBLIC_HOSTNAME = "locomotive.example.invalid"
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- clock
+
+
+class FakeClock:
+    def __init__(self, start: datetime | None = None) -> None:
+        self._now = start or datetime(2026, 11, 25, 12, 0, 0, tzinfo=UTC)
+        self._lock = threading.Lock()
+
+    def now(self) -> datetime:
+        with self._lock:
+            return self._now
+
+    def advance(self, **kwargs: float) -> None:
+        with self._lock:
+            self._now += timedelta(**kwargs)
+
+    def set(self, when: datetime) -> None:
+        with self._lock:
+            self._now = when
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+# --------------------------------------------------------------------------- remote git repo
+
+
+def _git(*args: str, cwd: Path) -> str:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return subprocess.run(
+        ["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+DEFAULT_TREE = {
+    "ansible.cfg": "[defaults]\ninventory=hosts/inventory\n",
+    "hosts/inventory": "[servers]\nalpha\nbeta\n",
+    "mise.toml": '[tools]\n"pipx:ansible-core" = "2.22.0"\n',
+    "collections/requirements.yml": "---\ncollections:\n  - name: community.general\n",
+    "playbooks/servers.yml": "- hosts: servers\n  tasks: []\n",
+    "playbooks/docker.yml": "- hosts: docker\n  tasks: []\n",
+    "playbooks/mac.yml": "- hosts: mac\n  tasks: []\n",
+    "playbooks/locomotive.yml": "- hosts: locomotive\n  tasks: []\n",
+    "README.md": "fixture\n",
+}
+
+
+@dataclass
+class Remote:
+    """A bare repo used as the remote, plus a scratch clone to commit into it."""
+
+    bare: Path
+    work: Path
+
+    @property
+    def url(self) -> str:
+        return self.bare.as_uri()
+
+    def commit(
+        self,
+        files: dict[str, str | None],
+        message: str = "change",
+        branch: str = "main",
+    ) -> str:
+        """Write (or delete, with None) files on ``branch`` and push. Returns the new SHA."""
+        _git("checkout", "-q", "-B", branch, f"origin/{branch}" if self.has_branch(branch) else "HEAD", cwd=self.work)
+        for path, content in files.items():
+            target = self.work / path
+            if content is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+        _git("add", "-A", cwd=self.work)
+        _git("commit", "-q", "-m", message, cwd=self.work)
+        _git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=self.work)
+        _git("fetch", "-q", "origin", cwd=self.work)
+        return _git("rev-parse", "HEAD", cwd=self.work)
+
+    def has_branch(self, branch: str) -> bool:
+        return bool(_git("ls-remote", "--heads", "origin", branch, cwd=self.work))
+
+    def sha(self, branch: str = "main") -> str:
+        return _git("rev-parse", f"refs/heads/{branch}", cwd=self.bare)
+
+    def git_refs(self) -> str:
+        return _git("for-each-ref", "--format=%(refname) %(objectname)", cwd=self.bare)
+
+
+@pytest.fixture
+def remote(tmp_path: Path) -> Remote:
+    bare = tmp_path / "remote.git"
+    work = tmp_path / "remote-work"
+    _git("init", "-q", "--bare", "-b", "main", str(bare), cwd=tmp_path)
+    _git("init", "-q", "-b", "main", str(work), cwd=tmp_path)
+    _git("remote", "add", "origin", bare.as_uri(), cwd=work)
+    for path, content in DEFAULT_TREE.items():
+        (work / path).parent.mkdir(parents=True, exist_ok=True)
+        (work / path).write_text(content)
+    _git("add", "-A", cwd=work)
+    _git("commit", "-q", "-m", "initial", cwd=work)
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=work)
+    _git("fetch", "-q", "origin", cwd=work)
+    return Remote(bare=bare, work=work)
+
+
+@dataclass
+class WorkingCopy:
+    """A temp clone of the remote standing in for Ted's Working Copy (never the real one)."""
+
+    path: Path
+
+    def git(self, *args: str) -> str:
+        return _git(*args, cwd=self.path)
+
+    def write(self, files: dict[str, str | None]) -> None:
+        """Edit files without committing (None deletes)."""
+        for rel, content in files.items():
+            target = self.path / rel
+            if content is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+
+    def commit(self, files: dict[str, str | None], message: str = "local change") -> str:
+        """A local commit, not pushed (makes the Working Copy ahead of origin)."""
+        self.write(files)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", message)
+        return self.head()
+
+    def head(self) -> str:
+        return self.git("rev-parse", "HEAD")
+
+    def git_state(self) -> dict[str, str]:
+        """Every file under .git with its content hash: any write to the repo shows up here."""
+        import hashlib
+
+        git_dir = self.path / ".git"
+        return {
+            str(p.relative_to(git_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(git_dir.rglob("*"))
+            if p.is_file()
+        }
+
+
+@pytest.fixture
+def working_copy(tmp_path: Path, remote: Remote) -> WorkingCopy:
+    path = tmp_path / "src" / "ansible"
+    path.parent.mkdir(parents=True)
+    _git("clone", "-q", remote.url, str(path), cwd=tmp_path)
+    _git("config", "user.name", "test", cwd=path)
+    _git("config", "user.email", "test@example.invalid", cwd=path)
+    return WorkingCopy(path=path)
+
+
+# --------------------------------------------------------------------------- stub executables
+
+
+@dataclass
+class Stubs:
+    """Stub toolchain. ``scenario`` is read by the stubs at the moment they run."""
+
+    root: Path
+    scenario: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def bin(self) -> Path:
+        return self.root / "bin"
+
+    @property
+    def mise(self) -> Path:
+        return self.bin / "mise"
+
+    def script(self, **scenario: Any) -> None:
+        self.scenario.update(scenario)
+        (self.root / "scenario.json").write_text(json.dumps(self.scenario))
+
+    def calls(self, tool: str | None = None) -> list[dict[str, Any]]:
+        path = self.root / "calls.jsonl"
+        if not path.exists():
+            return []
+        calls = [json.loads(line) for line in path.read_text().splitlines() if line]
+        return [c for c in calls if tool is None or c["tool"] == tool]
+
+    def release_gate(self, name: str = "gate") -> None:
+        (self.root / name).touch()
+
+
+@pytest.fixture
+def stubs(tmp_path: Path) -> Stubs:
+    root = tmp_path / "stubs"
+    (root / "bin").mkdir(parents=True)
+    for src in STUBS_SRC.glob("*.py"):
+        if src.name.startswith("_"):
+            continue
+        dst = root / "bin" / src.stem.replace("_", "-")
+        dst.write_text(f"#!{sys.executable}\n" + src.read_text())
+        dst.chmod(0o755)
+    s = Stubs(root=root)
+    s.script()
+    return s
+
+
+# --------------------------------------------------------------------------- fake HTTP server
+
+
+@dataclass
+class CapturedRequest:
+    method: str
+    path: str
+    headers: dict[str, str]
+    body: bytes
+    at: float = 0.0  # time.monotonic() when it arrived
+
+
+class FakeHTTP:
+    def __init__(self) -> None:
+        self.requests: list[CapturedRequest] = []
+        self.status = 200
+        # Answers for the next requests, in order (then ``status``): scripts delivery failures.
+        self.statuses: list[int] = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _handle(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                fake.requests.append(
+                    CapturedRequest(self.command, self.path, dict(self.headers), body, time.monotonic())
+                )
+                self.send_response(fake.statuses.pop(0) if fake.statuses else fake.status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST = do_PUT = do_HEAD = _handle
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def fake_http() -> Iterator[FakeHTTP]:
+    server = FakeHTTP()
+    yield server
+    server.close()
+
+
+# --------------------------------------------------------------------------- the app
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class AppServer:
+    def __init__(self, settings: Settings, clock: FakeClock) -> None:
+        self.settings = settings
+        self.clock = clock
+        self.port = _free_port()
+        config = uvicorn.Config(
+            create_app(settings, clock=clock),
+            host="127.0.0.1",
+            port=self.port,
+            log_level="warning",
+            lifespan="on",
+        )
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    def __enter__(self) -> httpx.Client:
+        self.thread.start()
+        deadline = time.monotonic() + 10
+        while not self.server.started:
+            if not self.thread.is_alive() or time.monotonic() > deadline:
+                raise RuntimeError("locomotive did not start")
+            time.sleep(0.01)
+        self.client = httpx.Client(
+            base_url=self.base_url, timeout=10, headers={IDENTITY_HEADER: IDENTITY}
+        )
+        return self.client
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def __exit__(self, *exc: object) -> None:
+        self.client.close()
+        self.server.should_exit = True
+        self.thread.join(timeout=10)
+
+
+@pytest.fixture
+def data_dir(tmp_path: Path) -> Path:
+    path = tmp_path / "data"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def make_settings(
+    data_dir: Path, remote: Remote, stubs: Stubs
+) -> Callable[..., Settings]:
+    def make(**overrides: Any) -> Settings:
+        values: dict[str, Any] = {
+            "data_dir": data_dir,
+            "repo_url": remote.url,
+            "hidden_playbooks": ["mac.yml", "locomotive.yml"],
+            "mise_bin": str(stubs.mise),
+            "trusted_proxy_ips": ["127.0.0.1"],
+            "identity_header": IDENTITY_HEADER,
+            "allowlist": [IDENTITY],
+            "mcp_tokens": [f"lxc={token_hash(LXC_TOKEN)}", f"mac={token_hash(MAC_TOKEN)}"],
+            "public_hostname": PUBLIC_HOSTNAME,
+        }
+        values.update(overrides)
+        return Settings(**values)
+
+    return make
+
+
+@pytest.fixture
+def app_servers() -> Iterator[list[AppServer]]:
+    servers: list[AppServer] = []
+    yield servers
+    for server in reversed(servers):
+        if server.thread.is_alive():
+            server.__exit__(None, None, None)
+
+
+@pytest.fixture
+def start_app(
+    make_settings: Callable[..., Settings], clock: FakeClock, app_servers: list[AppServer]
+) -> Callable[..., httpx.Client]:
+    def start(**overrides: Any) -> httpx.Client:
+        server = AppServer(make_settings(**overrides), clock)
+        app_servers.append(server)
+        return server.__enter__()
+
+    return start
+
+
+@pytest.fixture
+def stop_app(app_servers: list[AppServer]) -> Callable[[httpx.Client], None]:
+    """Shut down (gracefully, as on ``docker stop``) the app instance behind ``client``."""
+
+    def stop(client: httpx.Client) -> None:
+        [server] = [s for s in app_servers if s.client is client]
+        server.__exit__(None, None, None)
+
+    return stop
+
+
+@pytest.fixture
+def client(start_app: Callable[..., httpx.Client]) -> httpx.Client:
+    return start_app()
+
+
+@pytest.fixture
+def anonymous() -> Iterator[Callable[..., httpx.Client]]:
+    """``anonymous(client, headers)``: a client to the same app carrying only ``headers``."""
+    made: list[httpx.Client] = []
+
+    def make(client: httpx.Client, headers: dict[str, str] | None = None) -> httpx.Client:
+        c = httpx.Client(base_url=client.base_url, timeout=10, headers=headers)
+        made.append(c)
+        return c
+
+    yield make
+    for c in made:
+        c.close()
+
+
+# --------------------------------------------------------------------------- MCP
+
+
+class McpCaller:
+    """The official MCP client over streamable HTTP, one session per call, used synchronously.
+
+    It sends ``Host: PUBLIC_HOSTNAME`` (as Traefik would pass it) unless ``host`` says otherwise.
+    """
+
+    def __init__(
+        self, base_url: str, token: str | None, host: str | None = PUBLIC_HOSTNAME,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.base_url = base_url
+        self.token = token
+        self.host = host
+        self.headers = headers or {}
+
+    def session(self, fn: Callable[[Client], Any]) -> Any:
+        async def go() -> Any:
+            headers = dict(self.headers)
+            if self.token is not None:
+                headers["Authorization"] = f"Bearer {self.token}"
+            if self.host is not None:
+                headers["Host"] = self.host
+            async with httpx2.AsyncClient(headers=headers, timeout=30) as http:
+                transport = streamable_http_client(f"{self.base_url}/mcp", http_client=http)
+                async with Client(transport, read_timeout_seconds=30) as mcp:
+                    return await fn(mcp)
+
+        return asyncio.run(go())
+
+    def tool_names(self) -> set[str]:
+        async def names(mcp: Client) -> set[str]:
+            return {tool.name for tool in (await mcp.list_tools()).tools}
+
+        return self.session(names)
+
+    def call(self, tool: str, **arguments: Any) -> CallToolResult:
+        async def call(mcp: Client) -> CallToolResult:
+            return await mcp.call_tool(tool, arguments)
+
+        return self.session(call)
+
+    def ok(self, tool: str, **arguments: Any) -> Any:
+        """The tool's structured result; fails the test if the tool reported an error."""
+        result = self.call(tool, **arguments)
+        assert not result.is_error, _text(result)
+        return result.structured_content
+
+    def error(self, tool: str, **arguments: Any) -> str:
+        """The error text the tool reported; fails the test if it succeeded."""
+        result = self.call(tool, **arguments)
+        assert result.is_error, result.structured_content
+        return _text(result)
+
+
+def _text(result: CallToolResult) -> str:
+    return "\n".join(getattr(block, "text", "") for block in result.content)
+
+
+@pytest.fixture
+def mcp(client: httpx.Client) -> McpCaller:
+    """An MCP client with the ``lxc`` token, to the app behind ``client``."""
+    return McpCaller(str(client.base_url), LXC_TOKEN)
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+TERMINAL = {"succeeded", "failed", "canceled", "interrupted"}
+
+
+def wait_for_run(client: httpx.Client, run_id: int, timeout: float = 10) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        run = client.get(f"/api/runs/{run_id}").raise_for_status().json()
+        if run["status"] in TERMINAL:
+            return run
+        if time.monotonic() > deadline:
+            raise AssertionError(f"Run {run_id} still {run['status']} after {timeout}s")
+        time.sleep(0.05)
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        time.sleep(0.05)
+
+
+def sse_events(lines):
+    """Parse an SSE line iterator into (event, id, data) tuples."""
+    event, ident, data = "message", None, []
+    for line in lines:
+        if line == "":
+            if data:
+                yield event, ident, "\n".join(data)
+            event, ident, data = "message", None, []
+        elif line.startswith(":"):
+            continue
+        else:
+            field, _, value = line.partition(":")
+            value = value.removeprefix(" ")
+            if field == "event":
+                event = value
+            elif field == "id":
+                ident = value
+            elif field == "data":
+                data.append(value)
+
+
+def preview_for(hosts: list[str], unmatched: list[str] | None = None) -> dict:
+    """What the preview helper reports for a limit: one play hitting ``hosts``."""
+    return {
+        "ok": True,
+        "plays": [{
+            "name": "Servers",
+            "pattern": "servers",
+            "hosts": hosts,
+            "all_hosts": ["alpha", "beta"],
+            "tags": [],
+            "tasks": [],
+        }],
+        "hosts": hosts,
+        "all_hosts": ["alpha", "beta"],
+        "unmatched": unmatched or [],
+        "tags": [],
+        "groups": [{"name": "servers", "children": [], "hosts": ["alpha", "beta"]}],
+    }
