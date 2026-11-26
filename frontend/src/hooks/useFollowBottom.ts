@@ -18,6 +18,9 @@ function atBottom(el: HTMLElement): boolean {
  * `contentKey` should change whenever the content changes (e.g. line count,
  * filter). While `active` is false nothing is pinned automatically.
  *
+ * Give the element `tabIndex={0}`: keys (ArrowUp/PageUp/Home) only reach its
+ * keydown listener while it has focus.
+ *
  * `jumpTo(top)` scrolls somewhere on the reader's behalf (e.g. to a task's
  * line): follow turns off as if they had scrolled up, and landing at the
  * bottom doesn't resume it until they scroll themselves or press resume.

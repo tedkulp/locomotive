@@ -319,7 +319,8 @@ function TaskGrid({
     <div
       ref={ref}
       onScroll={onScroll}
-      className="overflow-auto max-h-[45%] border-b border-border bg-card"
+      tabIndex={0}
+      className={cn("overflow-auto max-h-[45%] border-b border-border bg-card", SCROLL_FOCUS)}
     >
       <table className="text-xs border-separate border-spacing-0">
         <thead className="sticky top-0 bg-card z-10">
@@ -466,6 +467,9 @@ type LogJump = { seq: number; n: number };
 
 const HIGHLIGHT_MS = 2000;
 
+/** Keyboard focus on a scroll pane (focusable so arrow/page keys scroll it and reach useFollowBottom). */
+const SCROLL_FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40";
+
 function LogView({
   lines,
   live,
@@ -510,7 +514,8 @@ function LogView({
       <div
         ref={ref}
         onScroll={onScroll}
-        className="h-full overflow-auto font-mono text-[12px] leading-5 p-3 bg-card"
+        tabIndex={0}
+        className={cn("h-full overflow-auto font-mono text-[12px] leading-5 p-3 bg-card", SCROLL_FOCUS)}
       >
         {shown.map((line) => (
           <div
