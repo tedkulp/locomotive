@@ -4,6 +4,7 @@ Time is driven by the injected clock. The scheduler loop ticks often in tests (e
 time) and always evaluates the clock's current time; ``tick`` waits until a tick has seen it.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -400,6 +401,23 @@ def test_the_scheduler_loop_pings_healthchecks_every_five_minutes(sched_app, clo
     status = app.get("/api/scheduler").json()
     assert status["last_ping_at"] == iso(local(2026, 11, 25, 12, 5))
     assert "check-uuid" not in str(status)  # the ping URL is a secret
+
+
+def test_the_ping_url_never_reaches_the_log_whether_the_ping_succeeds_or_fails(sched_app, clock, fake_http, caplog):
+    url = f"{fake_http.url}/ping/check-uuid"
+    clock.set(local(2026, 11, 25, 12, 0))
+    with caplog.at_level(logging.DEBUG):
+        app = sched_app(healthchecks_url=url)
+        tick(app, clock)
+        wait_until(lambda: len(fake_http.requests) == 1)
+
+        fake_http.status = 503
+        clock.set(local(2026, 11, 25, 12, 5))
+        wait_until(lambda: "Scheduler Ping failed" in caplog.text)
+
+    assert "Scheduler Ping failed: healthchecks answered HTTP 503" in caplog.text
+    assert "check-uuid" not in caplog.text
+    assert fake_http.url not in caplog.text
 
 
 def test_a_failed_ping_is_retried_on_the_next_tick_and_never_stops_the_scheduler(sched_app, clock, fake_http):

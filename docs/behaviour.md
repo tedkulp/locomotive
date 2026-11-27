@@ -101,7 +101,9 @@ expression read in `LOCOMOTIVE_TIME_ZONE` (unset: `TZ`, then `/etc/localtime`, t
   drops firings with no record; re-enabling or resuming doesn't catch up.
 
 The loop also sends the Scheduler Ping (GET `LOCOMOTIVE_HEALTHCHECKS_URL`) every 5 minutes, retrying a
-failed one on the next tick.
+failed one on the next tick. The URL is a secret: it never appears in the log or in `/api/scheduler`
+(a failed ping logs only `Scheduler Ping failed: <reason>`). The same goes for the repo token, the
+ntfy token and the MCP tokens.
 
 ## Notifications
 

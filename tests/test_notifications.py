@@ -4,11 +4,12 @@ The fake HTTP server stands in for ntfy; what it captured is what the user's pho
 """
 
 import json
+import logging
 import socket
 
 import pytest
 
-from conftest import LXC_TOKEN, PUBLIC_HOSTNAME, McpCaller, preview_for, wait_for_run, wait_until
+from conftest import LXC_TOKEN, MAC_TOKEN, PUBLIC_HOSTNAME, McpCaller, preview_for, token_hash, wait_for_run, wait_until
 from test_run_grid import changed, result, stats, task
 from test_schedules import BLOCKED, create, entries, local, tick
 
@@ -473,3 +474,25 @@ def test_a_successful_mcp_run_stays_silent_and_a_failed_one_notifies(app, stubs,
     assert message["priority"] == 4
     assert message["message"].splitlines()[0] == "Source: mcp:lxc"
     assert app.get(f"/api/runs/{quiet['id']}").json()["notification"] is None
+
+
+# --------------------------------------------------------------------------- secrets in the log
+
+
+def test_no_configured_secret_reaches_the_log_during_a_run_that_notifies(
+    notify_app, stubs, fake_http, caplog, capfd
+):
+    ping_url = f"{fake_http.url}/ping/check-uuid"
+    with caplog.at_level(logging.DEBUG):
+        app = notify_app(repo_token="tok-repo-secret", healthchecks_url=ping_url, scheduler_interval_seconds=0.02)
+        wait_until(lambda: any(r.path == "/ping/check-uuid" for r in fake_http.requests))
+        stubs.script(runner=FAILING)
+        run = McpCaller(str(app.base_url), LXC_TOKEN).ok("start_run", playbook="servers.yml")
+        assert wait_for_run(app, run["id"])["status"] == "failed"
+        wait_until(lambda: len(sent(fake_http)) == 1)
+
+    out, err = capfd.readouterr()
+    logged = caplog.text + out + err
+    mcp_tokens = (LXC_TOKEN, token_hash(LXC_TOKEN), MAC_TOKEN, token_hash(MAC_TOKEN))
+    for secret in (TOKEN, "tok-repo-secret", "check-uuid", *mcp_tokens):
+        assert secret not in logged

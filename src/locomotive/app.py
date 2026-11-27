@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,8 +24,16 @@ from locomotive.supervisor import Supervisor
 from locomotive.working_copy import WorkingCopy
 
 
+# httpx logs every request at INFO, URL included, and the MCP server turns the root logger up to INFO.
+# Some request URLs are secrets (the healthchecks ping URL), so keep the client libraries to WARNING:
+# the Scheduler Ping and the Notifier log their own failures, without the URL.
+QUIET_LOGGERS = ("httpx", "httpcore")
+
+
 def create_app(settings: Settings, clock: Clock | None = None) -> FastAPI:
     clock = clock or SystemClock()
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
