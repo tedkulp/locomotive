@@ -174,7 +174,8 @@ def test_a_slow_helper_times_out_within_the_preview_budget(start_app, stubs):
     client.post("/api/preview", json={"playbook": "servers.yml"}).raise_for_status()  # runtime now prepared
     stubs.script(preview_delay=5)
 
-    resp = client.post("/api/preview", json={"playbook": "servers.yml"})
+    # A new request (the limit changed), so the helper is asked rather than a remembered reply used.
+    resp = client.post("/api/preview", json={"playbook": "servers.yml", "limit": "alpha"})
 
     assert resp.status_code == 504
     assert resp.elapsed.total_seconds() < 3
@@ -216,3 +217,101 @@ def test_ansible_inventory_is_never_used_for_previews_or_runs(client, stubs):
 
     assert stubs.calls("ansible-inventory") == []
     assert stubs.calls("ansible-python")
+
+
+# ---------------------------------------------------------------------- remembered replies
+
+
+def test_an_identical_preview_of_a_commit_is_answered_without_asking_the_helper_again(client, stubs):
+    stubs.script(preview=REPLY)
+    request = {"playbook": "servers.yml", "limit": "alpha", "tags": ["base"], "extra_vars": {"a": 1}}
+
+    first = client.post("/api/preview", json=request)
+    second = client.post("/api/preview", json=request)
+
+    assert first.status_code == second.status_code == 200
+    assert second.json() == first.json()
+    assert len(stubs.calls("ansible-python")) == 1
+
+
+def test_switching_back_to_a_playbook_reuses_its_remembered_preview(client, stubs, remote):
+    sha = remote.sha("main")
+    for playbook in ("servers.yml", "docker.yml", "servers.yml"):
+        client.post("/api/preview", json={"playbook": playbook, "sha": sha}).raise_for_status()
+
+    assert [c["request"]["playbook"] for c in stubs.calls("ansible-python")] == [
+        "playbooks/servers.yml", "playbooks/docker.yml",
+    ]
+
+
+def test_changing_what_the_helper_is_asked_asks_it_again(client, stubs):
+    base = {"playbook": "servers.yml"}
+    for change in ({}, {"limit": "alpha"}, {"tags": ["base"]}, {"extra_vars": {"a": 1}}, {"expand_includes": True}):
+        client.post("/api/preview", json={**base, **change}).raise_for_status()
+
+    assert len(stubs.calls("ansible-python")) == 5
+
+
+def test_changing_only_check_diff_or_verbosity_reuses_the_reply_with_the_new_command(client, stubs):
+    client.post("/api/preview", json={"playbook": "servers.yml"}).raise_for_status()
+
+    body = client.post("/api/preview", json={"playbook": "servers.yml", "check": True, "diff": True, "verbosity": 2})
+
+    assert body.status_code == 200
+    assert body.json()["command"] == "ansible-playbook playbooks/servers.yml --check --diff -vv"
+    assert len(stubs.calls("ansible-python")) == 1
+
+
+def test_the_same_preview_at_a_new_commit_asks_the_helper_again(client, stubs, remote):
+    client.post("/api/preview", json={"playbook": "servers.yml"}).raise_for_status()
+    remote.commit({"README.md": "changed\n"})
+
+    client.post("/api/preview", json={"playbook": "servers.yml"}).raise_for_status()
+
+    assert len(stubs.calls("ansible-python")) == 2
+
+
+def test_a_failed_preview_is_not_remembered(client, stubs):
+    stubs.script(preview={"ok": False, "error": "ERROR! broken"})
+    assert client.post("/api/preview", json={"playbook": "servers.yml"}).status_code == 422
+    stubs.script(preview_rc=1)
+    assert client.post("/api/preview", json={"playbook": "servers.yml"}).status_code == 502
+    stubs.script(preview=REPLY, preview_rc=0)
+
+    resp = client.post("/api/preview", json={"playbook": "servers.yml"})
+
+    assert resp.status_code == 200
+    assert resp.json()["tags"] == ["base", "packages"]
+    assert len(stubs.calls("ansible-python")) == 3
+
+
+def test_a_remembered_preview_still_carries_no_host_vars(client, stubs):
+    leaky = json.loads(json.dumps(REPLY))
+    leaky["hostvars"] = {"alpha": {"vault_secret": "hunter2"}}
+    leaky["plays"][0]["vars"] = {"vault_secret": "hunter2"}
+    stubs.script(preview=leaky)
+    client.post("/api/preview", json={"playbook": "servers.yml"}).raise_for_status()
+
+    resp = client.post("/api/preview", json={"playbook": "servers.yml"})
+
+    assert resp.status_code == 200
+    assert "hunter2" not in resp.text
+    assert len(stubs.calls("ansible-python")) == 1
+
+
+def test_a_commit_remembers_only_its_most_recent_previews(client, stubs, remote):
+    from locomotive.preview import KEEP_REPLIES
+
+    sha = remote.sha("main")
+    ask = lambda limit: client.post(  # noqa: E731
+        "/api/preview", json={"playbook": "servers.yml", "sha": sha, "limit": limit}
+    ).raise_for_status()
+    ask("host0")
+    for n in range(1, KEEP_REPLIES + 1):
+        ask(f"host{n}")
+    ask(f"host{KEEP_REPLIES}")  # the newest is still remembered
+    assert len(stubs.calls("ansible-python")) == KEEP_REPLIES + 1
+
+    ask("host0")  # the oldest was dropped to stay within the bound
+
+    assert len(stubs.calls("ansible-python")) == KEEP_REPLIES + 2

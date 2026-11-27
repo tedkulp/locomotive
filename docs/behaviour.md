@@ -83,6 +83,12 @@ The first preview of a commit or Working Copy prepares its Ansible runtime (`mis
 which can outlast the preview time limit: the preparation carries on in the background and the preview
 answers `503` with `Retry-After: 2` until it is ready (the launch form keeps asking and says so).
 
+A clean preview's reply is remembered in memory per commit and helper request (Playbook, limit, tags,
+extra vars, expand includes), so picking the same Playbook again at the same commit answers at once.
+Check, diff and verbosity only change the `command`, so they reuse the reply. Failed previews are not
+remembered, each commit keeps its 16 most recently used replies and drops them with its prepared runtime, and Working Copy previews always
+ask the helper, since the files can change on disk without a commit.
+
 ## Schedules
 
 Schedules (`/api/schedules`, the Schedules page) are saved Run settings (Playbook, limit, tags,
