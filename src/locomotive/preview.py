@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import shutil
 import time
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,7 @@ from locomotive.settings import Settings
 from locomotive.working_copy import WorkingCopy
 
 KEEP_PREPARED = 4
+KEEP_REPLIES = 16  # remembered clean preview replies per commit, most recently used kept
 TOOLCHAIN_FILES = ("mise.toml", "collections/requirements.yml")
 TASKS_LABEL = "tasks that may run"
 
@@ -55,6 +57,9 @@ class Previewer:
         self._checkout = checkout
         self._toolchain = toolchain
         self._prepared: dict[str, _Prepared] = {}
+        # Sanitized helper replies for clean previews, by commit and then by helper request. A commit's
+        # replies go when its prepared runtime is evicted. Never the Working Copy: it changes on disk.
+        self._replies: dict[str, dict[str, dict[str, Any]]] = {}
 
     @property
     def previews_dir(self) -> Path:
@@ -82,7 +87,15 @@ class Previewer:
         if sha is None or not await self._checkout.has_commit(sha):
             sha = await self._checkout.fetch(branch)
         runtime = await self._runtime(sha, lambda: self._prepare(sha), options.playbook, f"at {sha[:12]}", deadline)
-        reply = await self._ask(runtime, options, expand_includes, deadline)
+        request = options.helper_request(expand_includes)
+        request_key = json.dumps(request, sort_keys=True)  # canonical: the request holds a list and a dict
+        replies = self._replies.setdefault(sha, {})
+        reply = replies.pop(request_key, None)  # re-inserted below, so dict order is least recently used first
+        if reply is None:  # only a successful reply is remembered; a failure raises before this
+            reply = await self._ask(runtime, request, deadline)
+        replies[request_key] = reply
+        if len(replies) > KEEP_REPLIES:
+            del replies[next(iter(replies))]
         return {"checkout": "clean", "branch": branch, "sha": sha, "command": options.command(), **reply}
 
     async def preview_working_copy(
@@ -103,7 +116,7 @@ class Previewer:
             key, lambda: self._toolchain.prepare(project), options.playbook, "in the Working Copy", deadline,
             cleanup=False,
         )
-        reply = await self._ask(runtime, options, expand_includes, deadline)
+        reply = await self._ask(runtime, options.helper_request(expand_includes), deadline)
         return {
             "checkout": "working_copy",
             "branch": status.branch or "HEAD",
@@ -113,12 +126,10 @@ class Previewer:
         }
 
     async def _ask(
-        self, runtime: Runtime, options: LaunchOptions, expand_includes: bool, deadline: float
+        self, runtime: Runtime, request: dict[str, Any], deadline: float
     ) -> dict[str, Any]:
         try:
-            reply = await self._toolchain.preview(
-                runtime, options.helper_request(expand_includes), timeout=deadline - time.monotonic()
-            )
+            reply = await self._toolchain.preview(runtime, request, timeout=deadline - time.monotonic())
         except PreviewTimeout as exc:
             raise PreviewError(504, str(exc)) from exc
         except ToolchainError as exc:
@@ -179,6 +190,7 @@ class Previewer:
             if not prepared.task.done():
                 continue
             del self._prepared[key]
+            self._replies.pop(key, None)
             if prepared.cleanup:  # an export of a commit; never the Working Copy
                 shutil.rmtree(self.previews_dir / key, ignore_errors=True)
 

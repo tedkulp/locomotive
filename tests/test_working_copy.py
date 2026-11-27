@@ -227,3 +227,11 @@ def test_a_working_copy_preview_without_a_working_copy_is_rejected(client):
 
     assert resp.status_code == 422
     assert "no Working Copy" in resp.json()["detail"]
+
+
+def test_working_copy_previews_ask_the_helper_every_time(wc_client, stubs):
+    request = {"playbook": "servers.yml", "checkout": "working_copy"}
+    for _ in range(2):
+        wc_client.post("/api/preview", json=request).raise_for_status()
+
+    assert len(stubs.calls("ansible-python")) == 2
