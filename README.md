@@ -47,8 +47,20 @@ Requires Docker with Compose.
 
 ```sh
 cp .env.example .env   # set LOCOMOTIVE_REPO_URL and the three access-guard values
-docker compose up --build
+docker compose pull
+docker compose up -d
 ```
+
+This runs the published image, `ghcr.io/tedkulp/locomotive` (`linux/amd64` and `linux/arm64`).
+`LOCOMOTIVE_TAG` picks the tag:
+
+| `LOCOMOTIVE_TAG` | Image |
+| --- | --- |
+| `latest` (default) | The newest release |
+| `0.1.5`, `0.1` | A release, or the newest patch of a minor version |
+| `dev` | The tip of `main` (also published as `sha-<short sha>`) |
+
+To build from source instead, run `docker compose up --build`.
 
 The app listens on `127.0.0.1:8000` (change with `LOCOMOTIVE_BIND` / `LOCOMOTIVE_HOST_PORT`) and keeps
 its data in `./data` (`LOCOMOTIVE_DATA_PATH`). Put it behind a reverse proxy that sets the identity header.

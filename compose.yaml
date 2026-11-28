@@ -2,7 +2,7 @@
 services:
   locomotive:
     build: .
-    image: locomotive:${LOCOMOTIVE_TAG:-dev}
+    image: ghcr.io/tedkulp/locomotive:${LOCOMOTIVE_TAG:-latest}
     user: "1000:1000"
     restart: unless-stopped
     env_file:
