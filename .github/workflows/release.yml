@@ -1,0 +1,61 @@
+# Pushing a `v*` tag publishes a GitHub Release: a source tarball
+# (locomotive-X.Y.Z.tar.gz, from `git archive`), checksums.txt, and the tag's
+# CHANGELOG.md section as the notes. Tags with a `-` (v1.0.0-rc.1) are marked
+# pre-release. The Docker images for the same tag come from docker.yml.
+#
+# The job refuses to publish when pyproject.toml's version is not the tag's, or
+# when CHANGELOG.md has no section for it. Uses the run's own GITHUB_TOKEN.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload its assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version and changelog
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+          project=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)
+          if [ "$project" != "$version" ]; then
+            echo "::error::pyproject.toml version is $project, tag is $tag"
+            exit 1
+          fi
+
+          # The section under "## [X.Y.Z] - date", up to the next "## [" heading.
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]+\]: / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no entries under ## [$version]"
+            exit 1
+          fi
+
+      - name: Build tarball
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="locomotive-$VERSION/" \
+            -o "dist/locomotive-$VERSION.tar.gz" "$GITHUB_REF_NAME"
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag $prerelease
