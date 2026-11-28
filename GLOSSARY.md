@@ -8,6 +8,14 @@ _Avoid_: control node, runner
 One of the runnable top-level files in the Ansible repo's `playbooks/`, the unit a Controller offers to run.
 _Avoid_: task, template, job
 
+**Tag**:
+A label on plays and tasks in the Ansible repo. Choosing Tags for a Run limits it to the tasks that carry them. Choosing none runs everything.
+_Avoid_: label, filter
+
+**Description**:
+Text written in the Ansible repo that says what a Playbook or Tag is for, shown when choosing what to run. A Playbook's Description lives in the Playbook itself. A Tag's Description is repo-wide: a Tag means the same thing in every Playbook.
+_Avoid_: comment, help text, summary
+
 **Run**:
 One execution of a Playbook from a Controller against a chosen set of hosts, with its own log and outcome. It runs the Ansible repo as of one commit, or the Working Copy.
 _Avoid_: task (that is one step inside a play), job
