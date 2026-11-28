@@ -120,6 +120,8 @@ cd frontend && pnpm dev        # optional: Vite dev server proxying /api to :800
 
 - [docs/behaviour.md](docs/behaviour.md): the detailed rules for the queue, Working Copy, previews,
   Schedules, notifications, log retention and MCP
+- [docs/describing-an-ansible-repo.md](docs/describing-an-ansible-repo.md): instructions to hand an LLM
+  (or follow yourself) to add Playbook and Tag Descriptions to your Ansible repo
 - [GLOSSARY.md](GLOSSARY.md): what Run, Playbook, Working Copy, Schedule and Scheduler Ping mean here
 - Issues: GitHub Issues on this repo
 
