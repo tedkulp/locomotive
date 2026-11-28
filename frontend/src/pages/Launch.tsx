@@ -157,6 +157,7 @@ export function LaunchPage() {
     setPreviewError(null);
   };
 
+  const selectedPlaybook = listing?.playbooks.find((p) => p.name === playbook) ?? null;
   const current = previewKey === optionsKey && !previewError ? preview : null;
   const loading = previewKey !== optionsKey;
   const universe = preview?.hosts.all_hosts ?? [];
@@ -218,11 +219,21 @@ export function LaunchPage() {
                 type="button"
                 onClick={() => pickPlaybook(p.name)}
                 className={cn(
-                  "w-full text-left rounded-md px-2 py-1.5 font-mono text-sm",
+                  "w-full text-left rounded-md px-2 py-1.5",
                   playbook === p.name ? "bg-primary text-primary-foreground" : "hover:bg-muted",
                 )}
               >
-                {p.name}
+                <div className="font-mono text-sm">{p.name}</div>
+                {p.summary && (
+                  <div
+                    className={cn(
+                      "text-xs line-clamp-2",
+                      playbook === p.name ? "text-primary-foreground/70" : "text-muted-foreground",
+                    )}
+                  >
+                    {p.summary}
+                  </div>
+                )}
               </button>
             ))}
             {listing && listing.playbooks.length === 0 && (
@@ -231,6 +242,15 @@ export function LaunchPage() {
           </Card>
 
           <div className="space-y-4 min-w-0">
+            {selectedPlaybook?.description && (
+              <div className="px-1">
+                <div className="font-mono text-sm font-semibold">{selectedPlaybook.name}</div>
+                <p className="mt-1 text-sm text-muted-foreground whitespace-pre-line">
+                  {selectedPlaybook.description}
+                </p>
+              </div>
+            )}
+
             <HostsCard
               universe={universe}
               selected={selected}
@@ -242,22 +262,17 @@ export function LaunchPage() {
               loading={loading}
             />
 
-            <div className="grid grid-cols-2 gap-4">
-              <Card className="p-4">
-                <div className="font-medium mb-2">Tags</div>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {(preview?.tags ?? []).length ? (
-                    preview?.tags.map((t) => (
-                      <CheckBox key={t} on={tags.includes(t)} onChange={(v) => toggleTag(t, v)} label={t} />
-                    ))
-                  ) : (
-                    <span className="text-sm text-muted-foreground">No tags in this Playbook</span>
-                  )}
-                </div>
-                <div className="text-xs text-muted-foreground mt-2">None checked = run everything</div>
-              </Card>
-              <Card className="p-4 space-y-2">
-                <div className="font-medium">Options</div>
+            <TagsCard
+              tags={preview?.tags ?? []}
+              descriptions={preview?.tag_descriptions ?? {}}
+              warning={preview?.tag_descriptions_warning ?? null}
+              chosen={tags}
+              toggle={toggleTag}
+            />
+
+            <Card className="p-4">
+              <div className="font-medium mb-2">Options</div>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                 <CheckBox on={check} onChange={setCheck} label="Check mode" sub="--check" />
                 <CheckBox on={diff} onChange={setDiff} label="Show diff" sub="--diff" />
                 <label className="flex items-center gap-2 text-sm">
@@ -274,15 +289,15 @@ export function LaunchPage() {
                     ))}
                   </select>
                 </label>
-                <textarea
-                  value={extraText}
-                  onChange={(e) => setExtraText(e.target.value)}
-                  placeholder='Extra vars: {"key": "value"} or key=value'
-                  className="w-full font-mono text-xs rounded-md border border-border bg-card p-2 h-16"
-                />
-                {"error" in extra && <div className="text-xs text-red-700">{extra.error}</div>}
-              </Card>
-            </div>
+              </div>
+              <textarea
+                value={extraText}
+                onChange={(e) => setExtraText(e.target.value)}
+                placeholder='Extra vars: {"key": "value"} or key=value'
+                className="mt-2 w-full font-mono text-xs rounded-md border border-border bg-card p-2 h-16"
+              />
+              {"error" in extra && <div className="text-xs text-red-700">{extra.error}</div>}
+            </Card>
 
             <Card className="p-4">
               <TaskPreview
@@ -485,6 +500,54 @@ function CheckBox({
       <span>{label}</span>
       {sub && <span className="text-xs text-muted-foreground font-mono">{sub}</span>}
     </label>
+  );
+}
+
+/** One row per tag the Playbook uses: checkbox, name, and its Description from locomotive.yml (truncated,
+ *  full text on hover). A tag without a Description is a compact row. */
+function TagsCard({
+  tags,
+  descriptions,
+  warning,
+  chosen,
+  toggle,
+}: {
+  tags: string[];
+  descriptions: Record<string, string>;
+  warning: string | null;
+  chosen: string[];
+  toggle: (tag: string, on: boolean) => void;
+}) {
+  return (
+    <Card className="p-4">
+      <div className="font-medium mb-2">Tags</div>
+      {tags.length ? (
+        <ul className="divide-y divide-border">
+          {tags.map((t) => (
+            <li key={t}>
+              <label className="flex items-center gap-3 py-1 text-sm cursor-pointer select-none min-w-0">
+                <input
+                  type="checkbox"
+                  checked={chosen.includes(t)}
+                  onChange={(e) => toggle(t, e.target.checked)}
+                  className="h-4 w-4 shrink-0 accent-zinc-900"
+                />
+                <span className="font-mono shrink-0">{t}</span>
+                {descriptions[t] && (
+                  <span className="truncate text-muted-foreground" title={descriptions[t]}>
+                    {descriptions[t]}
+                  </span>
+                )}
+              </label>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="text-sm text-muted-foreground">No tags in this Playbook</span>
+      )}
+      <div className="text-xs text-muted-foreground mt-2">None checked = run everything</div>
+      {warning && <div className="text-xs text-muted-foreground mt-1 truncate" title={warning}>⚠ {warning}</div>}
+    </Card>
   );
 }
 

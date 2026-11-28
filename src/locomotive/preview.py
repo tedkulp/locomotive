@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from locomotive.checkout import Checkout, CheckoutError
+from locomotive.descriptions import LOCOMOTIVE_YML, read_text, tag_descriptions
 from locomotive.launch import LaunchOptions
 from locomotive.runtime import PreviewTimeout, Runtime, Toolchain, ToolchainError
 from locomotive.settings import Settings
@@ -96,7 +97,10 @@ class Previewer:
         replies[request_key] = reply
         if len(replies) > KEEP_REPLIES:
             del replies[next(iter(replies))]
-        return {"checkout": "clean", "branch": branch, "sha": sha, "command": options.command(), **reply}
+        return {
+            "checkout": "clean", "branch": branch, "sha": sha, "command": options.command(),
+            **reply, **_tag_descriptions(runtime.project, reply["tags"]),
+        }
 
     async def preview_working_copy(
         self, options: LaunchOptions, working_copy: WorkingCopy, expand_includes: bool
@@ -123,6 +127,7 @@ class Previewer:
             "sha": status.head_sha,
             "command": options.command(),
             **reply,
+            **_tag_descriptions(runtime.project, reply["tags"]),
         }
 
     async def _ask(
@@ -196,6 +201,16 @@ class Previewer:
 
 
 # ---------------------------------------------------------------------- the reply, field by field
+
+
+def _tag_descriptions(project: Path, tags: list[str]) -> dict[str, Any]:
+    """Descriptions of the Playbook's tags from the checkout's ``locomotive.yml``, read now: never part of
+    a remembered reply, so they always match the files (and the Working Copy is read live)."""
+    found, warning = tag_descriptions(read_text(project / LOCOMOTIVE_YML))
+    return {
+        "tag_descriptions": {tag: found[tag] for tag in tags if tag in found},
+        "tag_descriptions_warning": warning,
+    }
 
 
 def _read(path: Path) -> bytes:

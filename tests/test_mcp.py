@@ -267,6 +267,7 @@ def test_previews_inventory_and_tags(client, mcp, stubs) -> None:
     assert [t["name"] for t in tasks["tasks"]["plays"][0]["tasks"]] == ["install nginx"]
 
     assert mcp.ok("list_tags", playbook="servers.yml")["tags"] == ["web", "db"]
+    assert mcp.ok("list_tags", playbook="servers.yml")["tag_descriptions"] == {}
     inventory = mcp.ok("get_inventory", playbook="servers.yml")
     assert inventory["groups"] == [{"name": "servers", "children": [], "hosts": ["alpha", "beta"]}]
 
@@ -406,3 +407,21 @@ def test_tail_run_output_stays_fast_on_a_large_finished_log(start_app, stubs) ->
         assert page["finished"] is True
     assert page["lines"][-1]["text"] == "Run succeeded"
     assert page["more"] is False
+
+
+def test_playbook_and_tag_descriptions_reach_mcp(client, mcp, stubs, remote) -> None:
+    remote.commit({
+        "playbooks/servers.yml": "# Every server.\n- hosts: servers\n",
+        "locomotive.yml": "tags:\n  web: Nginx and certs\n",
+    })
+    reply = preview_for(["alpha"])
+    reply["tags"] = ["web", "db"]
+    stubs.script(previews={"": reply})
+
+    listed = {p["name"]: p for p in mcp.ok("list_playbooks")["playbooks"]}
+    tags = mcp.ok("list_tags", playbook="servers.yml")
+
+    assert (listed["servers.yml"]["summary"], listed["servers.yml"]["description"]) == ("Every server.",) * 2
+    assert tags["tags"] == ["web", "db"]
+    assert tags["tag_descriptions"] == {"web": "Nginx and certs"}
+    assert tags["tag_descriptions_warning"] is None

@@ -132,7 +132,9 @@ export interface PlaybookList {
   checkout: CheckoutKind;
   branch: string;
   sha: string;
-  playbooks: { name: string; path: string }[];
+  /** ``description`` is the Playbook's header comment (plain text, paragraphs split by a blank line);
+   *  ``summary`` its first paragraph. Both null when it has none. */
+  playbooks: { name: string; path: string; description: string | null; summary: string | null }[];
 }
 
 export interface LaunchOptions {
@@ -177,6 +179,10 @@ export interface Preview {
     plays: { name: string; pattern: string; tags: string[]; tasks: PreviewTask[] }[];
   };
   tags: string[];
+  /** Descriptions from the repo's locomotive.yml, for the tags above that have one. */
+  tag_descriptions: Record<string, string>;
+  /** Set when part of locomotive.yml had to be skipped (never blocks a Run). */
+  tag_descriptions_warning: string | null;
   inventory: { groups: { name: string; children: string[]; hosts: string[] }[] };
 }
 

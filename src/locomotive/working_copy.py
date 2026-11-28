@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from locomotive.checkout import PLAYBOOK_NAME, CheckoutError
+from locomotive.descriptions import PlaybookDescription, playbook_description, read_text
 
 DIFF_CAP_BYTES = 1_000_000
 AB = re.compile(r"^\+(\d+) -(\d+)$")
@@ -129,6 +130,10 @@ class WorkingCopy:
             p.name for p in directory.iterdir()
             if p.is_file() and PLAYBOOK_NAME.match(p.name) and p.name not in self._hidden
         )
+
+    def describe_playbooks(self, names: list[str]) -> dict[str, PlaybookDescription]:
+        """Each Playbook's Description as it is on disk now (never remembered: the files change)."""
+        return {name: playbook_description(read_text(self.path / "playbooks" / name)) for name in names}
 
     # ------------------------------------------------------------------ git plumbing (read-only)
 

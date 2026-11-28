@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from locomotive.checkout import BRANCH_NAME, CheckoutError, UnknownBranch
+from locomotive.descriptions import PlaybookDescription
 from locomotive.launch import LaunchOptions
 from locomotive.models import CheckoutKind, Run, RunSource, RunStatus
 from locomotive.preview import PreviewError
@@ -46,11 +47,12 @@ async def list_playbooks(
             status = await state.working_copy.status()
         except WorkingCopyUnavailable as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        names = state.working_copy.list_playbooks()
         return {
             "checkout": CheckoutKind.WORKING_COPY,
             "branch": status.branch or "HEAD",
             "sha": status.head_sha,
-            "playbooks": _playbooks(state.working_copy.list_playbooks()),
+            "playbooks": _playbooks(names, state.working_copy.describe_playbooks(names)),
         }
     try:
         listing = await state.checkout.list_playbooks(branch or state.settings.default_branch)
@@ -62,12 +64,20 @@ async def list_playbooks(
         "checkout": CheckoutKind.CLEAN,
         "branch": listing.branch,
         "sha": listing.sha,
-        "playbooks": _playbooks(listing.playbooks),
+        "playbooks": _playbooks(listing.playbooks, listing.descriptions),
     }
 
 
-def _playbooks(names: list[str]) -> list[dict]:
-    return [{"name": name, "path": f"playbooks/{name}"} for name in names]
+def _playbooks(names: list[str], descriptions: dict[str, PlaybookDescription]) -> list[dict]:
+    return [
+        {
+            "name": name,
+            "path": f"playbooks/{name}",
+            "description": descriptions[name].text,
+            "summary": descriptions[name].summary,
+        }
+        for name in names
+    ]
 
 
 @router.get("/branches")

@@ -14,10 +14,12 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from locomotive.descriptions import MAX_READ_BYTES, PlaybookDescription, playbook_description
 from locomotive.settings import Settings
 
 PLAYBOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml$")
 BRANCH_NAME = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$")
+KEEP_DESCRIPTIONS = 16  # commits whose Playbook Descriptions are remembered (a commit never changes)
 
 
 class CheckoutError(Exception):
@@ -33,6 +35,7 @@ class PlaybookList:
     branch: str
     sha: str
     playbooks: list[str]
+    descriptions: dict[str, PlaybookDescription]
 
 
 class Checkout:
@@ -40,6 +43,7 @@ class Checkout:
         self._settings = settings
         self._mirror = settings.data_dir / "mirror.git"
         self._lock = asyncio.Lock()
+        self._descriptions: dict[str, dict[str, PlaybookDescription]] = {}  # by commit, least recently used first
 
     # ------------------------------------------------------------------ public
 
@@ -91,7 +95,39 @@ class Checkout:
             for name in (out or "").splitlines()
             if PLAYBOOK_NAME.match(name) and name not in hidden
         )
-        return PlaybookList(branch=branch, sha=sha, playbooks=names)
+        return PlaybookList(branch=branch, sha=sha, playbooks=names, descriptions=await self._describe(sha, names))
+
+    async def _describe(self, sha: str, names: list[str]) -> dict[str, PlaybookDescription]:
+        """Each Playbook's Description at ``sha``, read from its raw text (remembered per commit)."""
+        known = self._descriptions.pop(sha, {})
+        missing = [name for name in names if name not in known]
+        if missing:
+            texts = await self._read_blobs(sha, [f"playbooks/{name}" for name in missing])
+            for name, text in zip(missing, texts, strict=True):
+                known[name] = playbook_description(text)
+        self._descriptions[sha] = known
+        if len(self._descriptions) > KEEP_DESCRIPTIONS:
+            del self._descriptions[next(iter(self._descriptions))]
+        return {name: known[name] for name in names}
+
+    async def _read_blobs(self, sha: str, paths: list[str]) -> list[str | None]:
+        """The text of each file at ``sha`` (up to ``MAX_READ_BYTES``), None where it isn't a file."""
+        query = "".join(f"{sha}:{path}\n" for path in paths).encode()
+        out = await self._git_bytes("cat-file", "--batch", what="Read Playbooks", stdin=query) or b""
+        texts: list[str | None] = []
+        pos = 0
+        for _ in paths:
+            end = out.index(b"\n", pos)
+            header = out[pos:end].split()
+            pos = end + 1
+            if len(header) != 3:  # "<name> missing" (or ambiguous)
+                texts.append(None)
+                continue
+            size = int(header[2])
+            body = out[pos : pos + size]
+            pos += size + 1  # the contents are followed by a newline
+            texts.append(body[:MAX_READ_BYTES].decode(errors="replace") if header[1] == b"blob" else None)
+        return texts
 
     async def export(self, sha: str, dest: Path) -> None:
         """Write the tree at ``sha`` into ``dest`` (which must not exist yet)."""
@@ -117,17 +153,17 @@ class Checkout:
         return env
 
     async def _git_bytes(
-        self, *args: str, what: str, cwd: Path | None = None, allow_fail: bool = False
+        self, *args: str, what: str, cwd: Path | None = None, allow_fail: bool = False, stdin: bytes | None = None
     ) -> bytes | None:
         proc = await asyncio.create_subprocess_exec(
             "git", *args,
             cwd=cwd or self._mirror,
             env=self._env(),
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL if stdin is None else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await proc.communicate()
+        out, err = await proc.communicate(stdin)
         if proc.returncode != 0:
             if allow_fail:
                 return None

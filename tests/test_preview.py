@@ -2,7 +2,7 @@
 
 import json
 
-from conftest import wait_for_run, wait_until
+from conftest import preview_for, wait_for_run, wait_until
 
 PLAYS = [
     {
@@ -315,3 +315,73 @@ def test_a_commit_remembers_only_its_most_recent_previews(client, stubs, remote)
     ask("host0")  # the oldest was dropped to stay within the bound
 
     assert len(stubs.calls("ansible-python")) == KEEP_REPLIES + 2
+
+
+# ---------------------------------------------------------------------- Tag Descriptions
+
+LOCOMOTIVE_YML = "tags:\n  base: Packages every server gets\n  unused: Not in this Playbook\n"
+
+
+def test_tag_descriptions_come_from_locomotive_yml_for_the_tags_the_playbook_uses(client, stubs, remote):
+    remote.commit({"locomotive.yml": LOCOMOTIVE_YML})
+    stubs.script(preview=REPLY)
+
+    body = client.post("/api/preview", json={"playbook": "servers.yml"}).json()
+
+    assert body["tags"] == ["base", "packages"]
+    assert body["tag_descriptions"] == {"base": "Packages every server gets"}  # packages: undescribed
+    assert body["tag_descriptions_warning"] is None
+
+
+def test_without_locomotive_yml_there_are_no_tag_descriptions(client, stubs):
+    stubs.script(preview=REPLY)
+
+    body = client.post("/api/preview", json={"playbook": "servers.yml"}).json()
+
+    assert (body["tag_descriptions"], body["tag_descriptions_warning"]) == ({}, None)
+
+
+def test_a_broken_locomotive_yml_is_a_warning_and_previews_and_runs_still_work(client, stubs, remote):
+    remote.commit({"locomotive.yml": "tags:\n  base: [unclosed\n"})
+    stubs.script(preview={**preview_for(["alpha", "beta"]), "tags": ["base"]})
+
+    resp = client.post("/api/preview", json={"playbook": "servers.yml"})
+
+    assert resp.status_code == 200
+    assert resp.json()["tag_descriptions"] == {}
+    assert resp.json()["tag_descriptions_warning"].startswith("locomotive.yml")
+    run = client.post("/api/runs", json={"playbook": "servers.yml"}).json()
+    run = wait_for_run(client, run["id"])
+    assert run["status"] == "succeeded", run["failure_reason"]
+
+
+def test_a_partly_broken_locomotive_yml_keeps_the_good_entries(client, stubs, remote):
+    remote.commit({"locomotive.yml": "tags:\n  base: Fine\n  packages: 42\n"})
+    stubs.script(preview=REPLY)
+
+    body = client.post("/api/preview", json={"playbook": "servers.yml"}).json()
+
+    assert body["tag_descriptions"] == {"base": "Fine"}
+    assert "packages" in body["tag_descriptions_warning"]
+
+
+def test_tag_descriptions_follow_a_new_commit_even_for_a_remembered_preview(client, stubs, remote):
+    stubs.script(preview=REPLY)
+    remote.commit({"locomotive.yml": "tags:\n  base: Before\n"})
+    assert client.post("/api/preview", json={"playbook": "servers.yml"}).json()["tag_descriptions"] == {"base": "Before"}
+
+    remote.commit({"locomotive.yml": "tags:\n  base: After\n"})
+
+    assert client.post("/api/preview", json={"playbook": "servers.yml"}).json()["tag_descriptions"] == {"base": "After"}
+
+
+def test_working_copy_tag_descriptions_are_read_live(start_app, stubs, working_copy):
+    stubs.script(preview=REPLY)
+    client = start_app(working_copy_path=working_copy.path)
+    ask = {"playbook": "servers.yml", "checkout": "working_copy"}
+    working_copy.write({"locomotive.yml": "tags:\n  base: Uncommitted\n"})
+    assert client.post("/api/preview", json=ask).json()["tag_descriptions"] == {"base": "Uncommitted"}
+
+    working_copy.write({"locomotive.yml": "tags:\n  base: Edited\n"})
+
+    assert client.post("/api/preview", json=ask).json()["tag_descriptions"] == {"base": "Edited"}

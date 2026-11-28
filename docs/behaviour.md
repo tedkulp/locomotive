@@ -89,6 +89,17 @@ Check, diff and verbosity only change the `command`, so they reuse the reply. Fa
 remembered, each commit keeps its 16 most recently used replies and drops them with its prepared runtime, and Working Copy previews always
 ask the helper, since the files can change on disk without a commit.
 
+### Descriptions
+
+Playbook Descriptions are read from each Playbook's raw text, never through the preview helper (YAML
+loaders drop comments): `GET /api/playbooks` gives each Playbook a `description` and `summary` (or null).
+Tool directive lines (`yaml-language-server:`, `vim:`, `-*-`) are skipped. A Description is capped at 2000
+characters and a summary at 200. Tag Descriptions come from `locomotive.yml` with each preview, as
+`tag_descriptions` (only for the tags the Playbook uses). Both are read from the same checkout as the
+listing or preview: Playbook Descriptions are remembered per commit (16 commits), `locomotive.yml` is read
+again with every preview, and the Working Copy is always read live. A broken `locomotive.yml` never
+blocks a preview or a Run: bad entries are skipped and `tag_descriptions_warning` says why.
+
 ## Schedules
 
 Schedules (`/api/schedules`, the Schedules page) are saved Run settings (Playbook, limit, tags,
