@@ -228,7 +228,8 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
     @tool
     async def list_playbooks(branch: str | None = None, source: Source = "clean") -> dict[str, Any]:
         """The Playbooks a Run can use, read now from the chosen checkout: a clean ``branch`` (default:
-        the default branch) or the Working Copy (``source: working_copy``)."""
+        the default branch) or the Working Copy (``source: working_copy``). Each has its Description and
+        summary (from the Playbook's header comment), or null."""
         params: dict[str, str] = {}
         if branch is not None:
             params["branch"] = branch
@@ -262,9 +263,16 @@ def create_mcp(app: FastAPI, settings: Settings, routers: list[APIRouter]) -> tu
 
     @tool
     async def list_tags(playbook: str, branch: str | None = None, source: Source = "clean") -> dict[str, Any]:
-        """The tags a Run of this Playbook can select (none selected means run everything)."""
+        """The tags a Run of this Playbook can select (none selected means run everything), with the
+        Description of each tag that has one in the repo's ``locomotive.yml``."""
         reply = await _preview(playbook, None, None, [], {}, branch, source)
-        return {"branch": reply.get("branch"), "sha": reply.get("sha"), "tags": reply["tags"]}
+        return {
+            "branch": reply.get("branch"),
+            "sha": reply.get("sha"),
+            "tags": reply["tags"],
+            "tag_descriptions": reply["tag_descriptions"],
+            "tag_descriptions_warning": reply["tag_descriptions_warning"],
+        }
 
     @tool
     async def preview_hosts(

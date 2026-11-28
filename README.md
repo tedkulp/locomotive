@@ -30,6 +30,16 @@ locomotive runs Playbooks from the repo at `LOCOMOTIVE_REPO_URL`. That repo need
   `mise install` and `mise exec` against it for every Run
 - Its inventory set by the repo's own Ansible config (locomotive passes no `-i`)
 - Optionally `collections/requirements.yml`, installed into a cache per Run
+- Optionally a Description for each Playbook and Tag, shown on the Launch screen:
+  - a Playbook's is the block of `#` comment lines at the top of the file (a leading `---` is fine).
+    A bare `#` line starts a new paragraph. The first paragraph is the summary shown in the Playbook list.
+  - Tags get theirs from `locomotive.yml` at the repo root:
+
+    ```yaml
+    tags:
+      docker: Install and configure Docker
+      hardening: SSH, firewall and sysctl lockdown
+    ```
 
 ## Quick start (Docker)
 
@@ -110,6 +120,8 @@ cd frontend && pnpm dev        # optional: Vite dev server proxying /api to :800
 
 - [docs/behaviour.md](docs/behaviour.md): the detailed rules for the queue, Working Copy, previews,
   Schedules, notifications, log retention and MCP
+- [docs/describing-an-ansible-repo.md](docs/describing-an-ansible-repo.md): instructions to hand an LLM
+  (or follow yourself) to add Playbook and Tag Descriptions to your Ansible repo
 - [GLOSSARY.md](GLOSSARY.md): what Run, Playbook, Working Copy, Schedule and Scheduler Ping mean here
 - Issues: GitHub Issues on this repo
 
