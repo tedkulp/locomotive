@@ -1,4 +1,5 @@
-# Publishes the multi-arch image to GHCR: `dev` + `sha-<short>` from main, `X.Y.Z` / `X.Y` / `latest` from v* tags.
+# Publishes the multi-arch image to GHCR. README.md (Quick start) lists the image tags.
+# `latest` comes from metadata-action's default: only non-pre-release semver tags get it.
 name: docker
 
 on:
@@ -13,9 +14,6 @@ permissions:
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   publish:
@@ -36,14 +34,12 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
-          flavor: latest=false
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=dev,enable={{is_default_branch}}
-            type=sha,prefix=sha-,enable={{is_default_branch}}
+            type=sha,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - uses: docker/build-push-action@v6
         with:

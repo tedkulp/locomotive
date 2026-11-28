@@ -52,7 +52,7 @@ docker compose up -d
 ```
 
 This runs the published image, `ghcr.io/tedkulp/locomotive` (`linux/amd64` and `linux/arm64`).
-`LOCOMOTIVE_TAG` picks the tag:
+`LOCOMOTIVE_TAG` picks the image tag:
 
 | `LOCOMOTIVE_TAG` | Image |
 | --- | --- |
@@ -60,7 +60,8 @@ This runs the published image, `ghcr.io/tedkulp/locomotive` (`linux/amd64` and `
 | `0.1.5`, `0.1` | A release, or the newest patch of a minor version |
 | `dev` | The tip of `main` (also published as `sha-<short sha>`) |
 
-To build from source instead, run `docker compose up --build`.
+To build from source instead, run `docker compose up --build`. The local build takes the same image name,
+so run `docker compose pull` to go back to the published image.
 
 The app listens on `127.0.0.1:8000` (change with `LOCOMOTIVE_BIND` / `LOCOMOTIVE_HOST_PORT`) and keeps
 its data in `./data` (`LOCOMOTIVE_DATA_PATH`). Put it behind a reverse proxy that sets the identity header.
